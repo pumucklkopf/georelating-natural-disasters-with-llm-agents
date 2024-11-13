@@ -1,1 +1,8 @@
 pandas~=2.2.3
+openai~=1.54.1
+python-dotenv~=1.0.1
+requests~=2.32.3
+langchain-openai~=0.2.6
+langchain-core~=0.3.15
+langgraph~=0.2.45
+pycountry~=24.6.1

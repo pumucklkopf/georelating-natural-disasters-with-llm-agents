@@ -70,10 +70,19 @@ class XMLDataHandler:
             'admin1': gaztag.find('admin1').text if gaztag.find('admin1') is not None else None
         }
 
-    def get_toponyms_for_article(self, docid):
+    def get_articles_df(self):
+        return self.articles_df
+
+    def get_articles_for_prompting(self) -> pd.DataFrame:
+        return self.articles_df[['docid', 'title', 'text']]
+
+    def get_toponyms_for_article(self, docid)-> pd.DataFrame:
         return self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid]
 
-    def get_toponyms_without_gaztag(self):
+    def get_short_toponyms_for_article(self, docid)-> pd.DataFrame:
+        return self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid][['phrase']]
+
+    def get_toponyms_without_gaztag(self)-> pd.DataFrame:
         return self.toponyms_without_gaztag_df
 
     def find_all_fields(self, file_name):
@@ -106,14 +115,22 @@ class XMLDataHandler:
         return total_duplicates
 
 
+
 # Example usage
 if __name__ == "__main__":
     data_handler = XMLDataHandler('data/')
     data_handler.parse_xml('LGL_test.xml')
-    article_docid = '39423136'
-    toponyms_for_article = data_handler.get_toponyms_for_article(article_docid)
-    print("Toponyms for article:", toponyms_for_article)
-    print("Number of words in the text of all articles:", data_handler.articles_df['text'].apply(lambda x: len(x.split())).sum())
-    # count how many toponyms are duplicate in an article for all articles
-    print("Number of duplicate toponyms:", data_handler.count_duplicate_toponyms())
+
+    for example_article in data_handler.get_articles_for_prompting().head(10).iterrows():
+        toponym_list = data_handler.get_toponyms_for_article(example_article[1]['docid']).values.tolist()
+        with open('output.txt', 'a') as f:
+            f.write(f"Article: {example_article[1]['docid']};{example_article[1]['title']};{example_article[1]['text']}"
+                    f"\nToponyms: {toponym_list}\n\n")
+
+    # article_docid = '39423136'
+    # toponyms_for_article = data_handler.get_toponyms_for_article(article_docid)
+    # print("Toponyms for article:", toponyms_for_article)
+    # print("Number of words in the text of all articles:", data_handler.articles_df['text'].apply(lambda x: len(x.split())).sum())
+    # # count how many toponyms are duplicate in an article for all articles
+    # print("Number of duplicate toponyms:", data_handler.count_duplicate_toponyms())
 

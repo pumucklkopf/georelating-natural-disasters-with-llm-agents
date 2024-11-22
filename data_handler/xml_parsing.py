@@ -1,22 +1,24 @@
+from typing import List, Dict, Optional, Set, Union
 import xml.etree.ElementTree as ET
 import pandas as pd
 import os
 
-class XMLDataHandler:
-    def __init__(self, data_directory):
-        self.data_directory = data_directory
-        self.articles_df = pd.DataFrame()
-        self.toponyms_with_gaztag_df = pd.DataFrame()
-        self.toponyms_without_gaztag_df = pd.DataFrame()
 
-    def parse_xml(self, file_name):
+class XMLDataHandler:
+    def __init__(self, data_directory: str) -> None:
+        self.data_directory = data_directory
+        self.articles_df: pd.DataFrame = pd.DataFrame()
+        self.toponyms_with_gaztag_df: pd.DataFrame = pd.DataFrame()
+        self.toponyms_without_gaztag_df: pd.DataFrame = pd.DataFrame()
+
+    def parse_xml(self, file_name: str) -> None:
         file_path = os.path.join(self.data_directory, file_name)
         tree = ET.parse(file_path)
         root = tree.getroot()
 
-        articles_data = []
-        toponyms_with_gaztag_data = []
-        toponyms_without_gaztag_data = []
+        articles_data: List[Dict[str, Union[str, None]]] = []
+        toponyms_with_gaztag_data: List[Dict[str, Union[str, None]]] = []
+        toponyms_without_gaztag_data: List[Dict[str, Union[str, None]]] = []
 
         for article in root.findall('article'):
             article_data = self._extract_article_data(article)
@@ -33,7 +35,7 @@ class XMLDataHandler:
         self.toponyms_with_gaztag_df = pd.DataFrame(toponyms_with_gaztag_data)
         self.toponyms_without_gaztag_df = pd.DataFrame(toponyms_without_gaztag_data)
 
-    def _extract_article_data(self, article):
+    def _extract_article_data(self, article: ET.Element) -> Dict[str, Union[str, None]]:
         return {
             'docid': article.get('docid'),
             'feedid': article.find('feedid').text,
@@ -44,7 +46,7 @@ class XMLDataHandler:
             'text': article.find('text').text
         }
 
-    def _extract_toponym_data(self, article, toponym):
+    def _extract_toponym_data(self, article: ET.Element, toponym: ET.Element) -> Dict[str, Union[str, None]]:
         toponym_data = {
             'docid': article.get('docid'),
             'start': toponym.find('start').text,
@@ -58,7 +60,7 @@ class XMLDataHandler:
 
         return toponym_data
 
-    def _extract_gaztag_data(self, gaztag):
+    def _extract_gaztag_data(self, gaztag: ET.Element) -> Dict[str, Union[str, None]]:
         return {
             'geonameid': gaztag.get('geonameid'),
             'name': gaztag.find('name').text if gaztag.find('name') is not None else None,
@@ -70,28 +72,41 @@ class XMLDataHandler:
             'admin1': gaztag.find('admin1').text if gaztag.find('admin1') is not None else None
         }
 
-    def get_articles_df(self):
+    def get_all_articles(self) -> pd.DataFrame:
         return self.articles_df
 
-    def get_articles_for_prompting(self) -> pd.DataFrame:
+    def get_article(self, docid: str) -> Optional[Dict[str, Union[str, None]]]:
+        article = self.articles_df[self.articles_df['docid'] == docid]
+        return article.to_dict(orient='records')[0] if not article.empty else None
+
+    def get_all_articles_for_prompting(self) -> pd.DataFrame:
         return self.articles_df[['docid', 'title', 'text']]
 
-    def get_toponyms_for_article(self, docid)-> pd.DataFrame:
-        return self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid]
+    def get_article_for_prompting(self, docid: str) -> Optional[Dict[str, Union[str, None]]]:
+        article = self.articles_df[self.articles_df['docid'] == docid][['docid', 'title', 'text']]
+        return article.to_dict(orient='records')[0] if not article.empty else None
 
-    def get_short_toponyms_for_article(self, docid)-> pd.DataFrame:
-        return self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid][['phrase']]
+    def get_all_toponyms_with_gaztag(self) -> pd.DataFrame:
+        return self.toponyms_with_gaztag_df
 
-    def get_toponyms_without_gaztag(self)-> pd.DataFrame:
+    def get_all_toponyms_without_gaztag(self) -> pd.DataFrame:
         return self.toponyms_without_gaztag_df
 
-    def find_all_fields(self, file_name):
+    def get_toponyms_for_article(self, docid: str) -> List[Dict[str, Union[str, None]]]:
+        toponyms = self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid]
+        return toponyms.to_dict(orient='records')
+
+    def get_short_toponyms_for_article(self, docid: str) -> List[str]:
+        phrases = self.toponyms_with_gaztag_df[self.toponyms_with_gaztag_df['docid'] == docid]['phrase']
+        return phrases.tolist()
+
+    def find_all_fields(self, file_name: str) -> Set[str]:
         file_path = os.path.join(self.data_directory, file_name)
         tree = ET.parse(file_path)
         root = tree.getroot()
-        fields = set()
+        fields: Set[str] = set()
 
-        def traverse(element):
+        def traverse(element: ET.Element) -> None:
             fields.add(element.tag)
             for child in element:
                 traverse(child)
@@ -99,20 +114,17 @@ class XMLDataHandler:
         traverse(root)
         return fields
 
-    def count_duplicate_toponyms(self):
-        # Check if the DataFrame is empty
+    def count_duplicate_toponyms(self) -> int:
         if self.toponyms_with_gaztag_df.empty:
             return 0
 
-        # Group by article and count duplicates within each article
         duplicate_counts = self.toponyms_with_gaztag_df.groupby('docid').apply(
             lambda x: x['phrase'].duplicated().sum()
         )
-
-        # Sum the counts of duplicates across all articles
         total_duplicates = duplicate_counts.sum()
 
         return total_duplicates
+
 
 
 
@@ -121,7 +133,7 @@ if __name__ == "__main__":
     data_handler = XMLDataHandler('data/')
     data_handler.parse_xml('LGL_test.xml')
 
-    for example_article in data_handler.get_articles_for_prompting().head(10).iterrows():
+    for example_article in data_handler.get_all_articles_for_prompting().head(10).iterrows():
         toponym_list = data_handler.get_toponyms_for_article(example_article[1]['docid']).values.tolist()
         with open('output.txt', 'a') as f:
             f.write(f"Article: {example_article[1]['docid']};{example_article[1]['title']};{example_article[1]['text']}"

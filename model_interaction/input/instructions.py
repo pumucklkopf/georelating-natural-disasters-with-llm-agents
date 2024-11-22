@@ -38,11 +38,11 @@ class SearchAgentSetup:
                 1. Read the news article provided to you with the key "News Article" to understand the context of the news.
                 2. In the article, identify all the toponyms which are provided with the key "Toponym List".
                 3. For every toponym in the "Toponym List", provide the search arguments for the GeoNames Websearch API in JSON format.
-                4. For this, adhere strictly to the output format: {[{"toponym": "<toponym>", "params": "<search arguments>", "duplicate_of": "<toponym>"}]}.
+                4. For this, adhere strictly to the output format: [{"toponym": "<toponym>", "params": {"<search arguments>": "<search_values>"}}].
                 5. Make sure that the search arguments adhere strictly to the GeoNames Websearch API documentation.
                 6. If you think that some toponyms are duplicated given the context of the news article (not necessarily the
                 same name), you can just reference the first occurrence of the toponym by providing the toponym to the
-                "duplicate_of" key in the output JSON.
+                "duplicate_of" key in the output JSON instead of the "params" key.
                 7. Usually, the search argument "q" is appropriate to use, and it can be provided with the toponym as the value, as well as other information such as upper administrative orders.
                 8. Usually, the search argument "isNameRequired" is set to "true" to ensure that the search results are relevant.
                 9. Make sure to make use of the "maxRows" search argument to limit the number of results returned.

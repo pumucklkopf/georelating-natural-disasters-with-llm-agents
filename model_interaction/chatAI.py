@@ -4,7 +4,7 @@ import json
 from pandas.io.common import file_exists
 
 import requests
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 
 
@@ -63,6 +63,16 @@ class ChatAIHandler:
                               model_name=model_name,
                               temperature=temperature,
                               top_p=top_p)
+
+    def get_embedding_model(self, model_name="e5-mistral-7b-instruct") -> OpenAIEmbeddings:
+        """
+        Get ChatAI embedding model
+        :param model_name: str: model name according to the GDWG ChatAI API
+        :return: ChatOpenAI: returns the LangChain embedding model
+        """
+        return OpenAIEmbeddings(api_key=self.api_key,
+                                base_url=self.base_url,
+                                model=model_name)
 
     def call_llm(self, model: ChatOpenAI, question: str) -> str:
         prompt = ChatPromptTemplate.from_messages([

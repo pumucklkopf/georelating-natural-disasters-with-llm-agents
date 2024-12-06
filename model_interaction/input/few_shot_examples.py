@@ -1,9 +1,12 @@
-import json
 from typing import List, Dict
-from langchain_core.prompts import FewShotPromptTemplate, PromptTemplate
+
+from langchain_core.documents import Document
+from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts.few_shot_with_templates import FewShotPromptWithTemplates
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.document_loaders import JSONLoader
 from data_handler.xml_parsing import XMLDataHandler
 
 class FewShotExampleHandler:
@@ -13,16 +16,28 @@ class FewShotExampleHandler:
         self.data_handler = XMLDataHandler(data_directory)
         self.data_handler.parse_xml(xml_file)
         self.examples = self._load_examples()
+        self.few_shot_template = self.create_few_shot_template()
 
-    def _load_ground_truth(self, few_shot_example_path: str = FEW_SHOT_EXAMPLE_PATH) -> List[Dict]:
-        with open(few_shot_example_path, 'r') as f:
-            few_shot_examples = json.load(f)
-        return few_shot_examples
+    def _load_ground_truth(self, few_shot_example_path: str = FEW_SHOT_EXAMPLE_PATH) -> List[Document]:
+
+        def _metadata_func(record: Dict, metadata: dict) -> dict:
+            metadata['docid'] = record.get('docid')
+            return metadata
+
+        loader = JSONLoader(
+            file_path=few_shot_example_path,
+            jq_schema='.[]',
+            content_key='ground_truth',
+            metadata_func=_metadata_func,
+            text_content=False
+        )
+        fs_examples = loader.load()
+        return fs_examples
 
     def _load_examples(self) -> List[Dict]:
         examples = []
         for gt_example in self._load_ground_truth():
-            _id = gt_example['docid']
+            _id = gt_example.metadata['docid']
             _article = self.data_handler.get_article_for_prompting(_id)
             toponym_list = self.data_handler.get_short_toponyms_for_article(_id)
 
@@ -31,7 +46,7 @@ class FewShotExampleHandler:
                 "input__heading": _article.get('title'),
                 "input__news_article": _article.get('text'),
                 "input__toponym_list": str(toponym_list),
-                "output": str(gt_example['ground_truth']) # TODO: Problem are the {s!!!
+                "output": gt_example.page_content
             }
             examples.append(example)
         return examples
@@ -47,34 +62,42 @@ class FewShotExampleHandler:
         )
         return SemanticSimilarityExampleSelector.from_examples(
             examples=self.examples,
-            embeddings=embeddings,
+            embeddings=embeddings,  #could also use new embedding model by ChatAI
             vectorstore_cls=Chroma,
             k=k
         )
 
-    def create_few_shot_template(self) -> FewShotPromptTemplate:
+    def create_few_shot_template(self) -> FewShotPromptWithTemplates:
         example_selector = self.create_example_selector()
-        example_template =  """
-                            Input:
-                            News Article Heading: {input__heading}
-                            News Article: {input__news_article}
-                            Toponym List: {input__toponym_list}
-                            
-                            Output: 
-                            {output}
-                            """
+        example_template =  ("Input:\n"
+                            "News Article Heading: {{input__heading}}\n"
+                            "News Article: {{input__news_article}}\n"
+                            "Toponym List: {{input__toponym_list}}\n\n"                      
+                            "Output:\n")
 
         example_prompt = PromptTemplate(
             input_variables=["input__heading", "input__news_article", "input__toponym_list", "output"],
-            template=example_template
+            template=example_template + "{{output}}",
+            template_format="mustache"
         )
-        return FewShotPromptTemplate(
+
+        prefix = PromptTemplate.from_template(
+            "Here are a few examples on how to provide the search arguments for a given news article:"
+        )
+
+        suffix = PromptTemplate(
+            input_variables=["input__heading", "input__news_article", "input__toponym_list", "output"],
+            template="\n\nNow consider all that you've been instructed on and provide the search arguments for this news article strictly in JSON without any additional text:\n\n" + example_template,
+            template_format="mustache"
+        )
+        return FewShotPromptWithTemplates(
             example_selector=example_selector,
             example_prompt=example_prompt,
-            prefix="Here are a few examples of how to provide the search arguments for a given news article:",
-            suffix=example_template,
-            example_separator="\n\nNext example:\n",
-            input_variables=["input__heading", "input__news_article", "input__toponym_list"]
+            prefix=prefix,
+            suffix=suffix,
+            example_separator="\n\n-----\n",
+            input_variables=["input__heading", "input__news_article", "input__toponym_list"],
+            template_format="mustache"
         )
 
 # Example usage
@@ -88,4 +111,4 @@ if __name__ == "__main__":
         input__news_article=article.get('text'),
         input__toponym_list=tops
     )
-    print(few_shot_template)
+    print(sim)

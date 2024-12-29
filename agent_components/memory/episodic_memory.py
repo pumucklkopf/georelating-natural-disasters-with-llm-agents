@@ -9,7 +9,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import JSONLoader
 from data_handler.xml_parsing import XMLDataHandler
 
-class FewShotExampleHandler:
+class EpisodicMemory:
     FEW_SHOT_EXAMPLE_PATH = 'data/few_shot_examples.json'
 
     def __init__(self, data_directory: str, xml_file: str):
@@ -102,10 +102,10 @@ class FewShotExampleHandler:
 
 # Example usage
 if __name__ == "__main__":
-    handler = FewShotExampleHandler(data_directory='data/', xml_file='LGL_test.xml')
-    few_shot_template = handler.create_few_shot_template()
-    article = handler.data_handler.get_article_for_prompting('38543434')
-    tops = str(handler.data_handler.get_short_toponyms_for_article('38543434'))
+    episodic_memory = EpisodicMemory(data_directory='data/', xml_file='LGL_test.xml')
+    few_shot_template = episodic_memory.create_few_shot_template()
+    article = episodic_memory.data_handler.get_article_for_prompting('38543434')
+    tops = str(episodic_memory.data_handler.get_short_toponyms_for_article('38543434'))
     sim = few_shot_template.format(
         input__heading=article.get('title'),
         input__news_article=article.get('text'),

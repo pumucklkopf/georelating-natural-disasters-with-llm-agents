@@ -125,6 +125,22 @@ class XMLDataHandler:
 
         return total_duplicates
 
+    def get_random_articles_for_evaluation(self, seed: int, n: int = 100) -> pd.DataFrame:
+        """
+        Returns a sample of `n` articles using the given `seed` for reproducibility.
+
+        :param seed: The seed for the random number generator.
+        :param n: The number of articles to sample. Default is 100.
+        :return: A tuple (sampled_articles, corresponding_toponyms).
+        """
+        # Ensure we have enough articles
+        n = min(n, (len(self.articles_df)-10))
+
+        # Sample articles reproducibly
+        sampled_articles = self.articles_df[10:].sample(n=n, random_state=seed)
+
+        return sampled_articles
+
 
 
 

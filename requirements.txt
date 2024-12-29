@@ -8,3 +8,6 @@ langgraph~=0.2.45
 pycountry~=24.6.1
 pydantic~=2.9.2
 langchain-community~=0.3.7
+tqdm~=4.66.6
+typing_extensions~=4.12.2
+ipython~=8.29.0

@@ -1,9 +1,6 @@
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, MessagesState, START
-from model_interaction.chatAI import ChatAIHandler
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
-
-from pydantic import BaseModel, Field
+from agent_components.llms.chatAI import ChatAIHandler
+from langchain_core.messages import HumanMessage, SystemMessage
 
 # Initialize the ChatAIHandler
 chatAI = ChatAIHandler()

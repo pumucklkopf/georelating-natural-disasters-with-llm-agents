@@ -1,0 +1,89 @@
+from openai import APITimeoutError, AuthenticationError, BadRequestError, ConflictError, \
+    InternalServerError, NotFoundError, PermissionDeniedError, RateLimitError, UnprocessableEntityError
+import time
+
+DAILY_RATE_LIMIT = 3000
+HOURLY_RATE_LIMIT = 300
+MINUTE_RATE_LIMIT = 50
+
+
+def handle_api_errors(call_times):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            manual_retries = 0
+            unexpected_rate_limit_retries = 0
+            while True:  # Loop indefinitely until the function succeeds
+                try:
+                    now = time.time()
+                    call_times.append(now)
+                    return func(*args, **kwargs)
+                except AuthenticationError as e:
+                    print(
+                        f"\nYour API key or token was invalid, expired, or revoked. Check your API key or token. Error: {e}")
+                    return e
+                except BadRequestError as e:
+                    print(
+                        f"\nYour request was malformed or missing some required parameters. Check the specific API method documentation you are calling. Error: {e}")
+                    return e
+                except ConflictError as e:
+                    print(
+                        f"\nThe resource was updated by another request. Try to update the resource again. Error: {e}")
+                    return e
+                except NotFoundError as e:
+                    print(
+                        f"\nRequested resource does not exist. Ensure you enter the correct resource identifier. Error: {e}")
+                    return e
+                except PermissionDeniedError as e:
+                    print(
+                        f"\nYou don't have access to the requested resource. Ensure you are using the correct API key, organization ID, and resource ID. Error: {e}")
+                    return e
+
+                except RateLimitError as e:
+                    now = time.time()
+                    # Remove timestamps older than 24 hours
+                    while call_times and now - call_times[0] > 86400:
+                        call_times.pop(0)
+
+                    if len(call_times) > DAILY_RATE_LIMIT:
+                        time_to_sleep = call_times[0] + 86400 - now
+                        print(
+                            f"\nDaily rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
+                        time.sleep(time_to_sleep)
+                    elif len(call_times) > HOURLY_RATE_LIMIT and now - call_times[-HOURLY_RATE_LIMIT] < 3600:
+                        time_to_sleep = call_times[-HOURLY_RATE_LIMIT] + 3600 - now
+                        print(
+                            f"\nHourly rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
+                        time.sleep(time_to_sleep)
+                    elif len(call_times) > DAILY_RATE_LIMIT and now - call_times[-MINUTE_RATE_LIMIT] < 60:
+                        time_to_sleep = call_times[-MINUTE_RATE_LIMIT] + 60 - now
+                        print(
+                            f"\nMinute rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
+                        time.sleep(time_to_sleep)
+                    else:
+                        unexpected_rate_limit_retries += 1
+                        if unexpected_rate_limit_retries < 10:
+                            print(f"\nUnexpected Rate Limit Error: {e}. Waiting for 10 minutes before retrying.")
+                            time.sleep(600)
+                        else:
+                            print(f"\nExceeded the maximum number of retries for unexpected rate limit errors. Exiting. Error: {e}")
+                            return e
+
+
+                except (APITimeoutError, InternalServerError, UnprocessableEntityError) as e:
+                    if manual_retries < 2:
+                        manual_retries += 1
+                        if isinstance(e, APITimeoutError):
+                            print(f"\nRequest timed out. Retrying after 10 seconds. Error: {e}")
+                        else:
+                            print(f"\nIssue on OpenAI's side. Retrying after 10 seconds. Error: {e}")
+                        time.sleep(10)
+                    else:
+                        print(f"\nExceeded the maximum number of retries. Exiting. Error: {e}")
+                        return e
+                except Exception as e:
+                    print(f"\nAn unexpected error occurred. Error: {e}")
+                    return e
+
+        return wrapper
+
+    return decorator

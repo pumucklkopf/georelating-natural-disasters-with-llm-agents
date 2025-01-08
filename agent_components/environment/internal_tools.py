@@ -42,7 +42,8 @@ class OutputParser:
         llm_output = LLMOutput(
             article_id=self.article_id,
             toponyms=self.toponym_list,
-            raw_output=message
+            raw_output=message.model_copy(),
+            parsed_output=[]
         )
         try:
             # if the string does not start with a '[', strip of the characters before the first '['
@@ -216,6 +217,10 @@ class ArticleSyntaxValidator:
 
     def validate_toponyms_of_article(self, llm_output: LLMOutput) -> ValidatedOutput:
         validated_output = ValidatedOutput(**llm_output.model_dump())
+
+        # needed for revision: set invalid to empty list
+        validated_output.invalid_toponyms = []
+
         if validated_output.fatal_errors:
             return validated_output
         try:
@@ -297,7 +302,7 @@ class ArticleSyntaxValidator:
             temp_toponym_list = [temp_toponym.toponym.casefold() for temp_toponym in (validated_output.valid_toponyms +
                                                                                       validated_output.duplicate_toponyms +
                                                                                       validated_output.invalid_toponyms)]
-            if len(temp_toponym_list) != len(validated_output.parsed_output):
+            if len(temp_toponym_list) != len(validated_output.parsed_output): # indicates most probably a coding error
                 print("FATAL ERROR: PARSING OR VALIDATION ERROR for article ", validated_output.article_id)
             if len(temp_toponym_list) < len(validated_output.toponyms):  # too few toponyms generated
                 for mention in validated_output.toponyms:
@@ -323,9 +328,9 @@ class ArticleSyntaxValidator:
                                                                             validated_output.duplicate_toponyms)])
 
             correct_nof_toponyms = len(validated_output.toponyms)
-            if nof_valid_invalid_duplicate < correct_nof_toponyms:
+            if nof_valid_invalid_duplicate < correct_nof_toponyms:  # indicates most probably a coding error
                 print("FATAL ERROR: TOO FEW TOPONYMS: VALIDATION ERROR for article ", validated_output.article_id)
-            if nof_valid_duplicate > correct_nof_toponyms:
+            if nof_valid_duplicate > correct_nof_toponyms: # indicates most probably a coding error
                 print("FATAL ERROR: TOO MANY TOPONYMS: VALIDATION ERROR for article ", validated_output.article_id)
 
             return validated_output

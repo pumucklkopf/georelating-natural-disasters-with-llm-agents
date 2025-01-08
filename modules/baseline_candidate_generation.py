@@ -53,10 +53,6 @@ class CandidateGenerator:
         })
 
         return llm_answer
-        # except Exception as e:
-        #     llm_answer = None
-        #     print(f"Error occurred while processing article {article_id}: {e}")
-        #     return llm_answer
 
     def generate_candidates_for_evaluation(self,
                                            seed: int = 42,

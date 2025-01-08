@@ -48,7 +48,7 @@ class LongTermMemory:
         return PromptTemplate(
             template=template,
             template_format="mustache",
-            input_variables=["schema"]
+            input_variables=[]
         )
 
     def _create_documentation_message(self):

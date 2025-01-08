@@ -8,7 +8,8 @@ class ExecutionStep(Enum):
     SEARCHPARAMETERVALIDATOR = "search_parameter_validator"
     ARTICLESYNTAXVALIDATOR = "article_syntax_validator"
     GEOAPI = "geonames_search_api"
-    LLM = "llm_generation"
+    ACTOR = "actor_llm_generation"
+    CRITIC = "critic_llm_generation"
 
 class Error(BaseModel):
     execution_step: ExecutionStep = Field(description="The step in which the error occurred")

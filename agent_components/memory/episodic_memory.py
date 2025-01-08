@@ -78,7 +78,7 @@ class EpisodicMemory:
         example_prompt = PromptTemplate(
             input_variables=["input__heading", "input__news_article", "input__toponym_list", "output"],
             template=example_template + "{{output}}",
-            template_format="mustache"
+            template_format="mustache"  # Requires langchain-core 0.3.15, langchain 0.3.7 bc later, mustache wrongly handles double quotes
         )
 
         prefix = PromptTemplate.from_template(
@@ -86,7 +86,7 @@ class EpisodicMemory:
         )
 
         suffix = PromptTemplate(
-            input_variables=["input__heading", "input__news_article", "input__toponym_list", "output"],
+            input_variables=["input__heading", "input__news_article", "input__toponym_list"],
             template="\n\nNow consider all that you've been instructed on and provide the search arguments for this news article strictly in JSON without any additional text:\n\n" + example_template,
             template_format="mustache"
         )

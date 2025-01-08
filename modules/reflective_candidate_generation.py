@@ -1,5 +1,6 @@
 import pickle
 import os
+import time
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -28,6 +29,7 @@ class ReflectiveCandidateGenerator:
         self.data_handler = self.working_memory.few_shot_handler.data_handler
         self.llm_handler = ChatAIHandler()
         self.llm = self.llm_handler.get_model(llm_model_name)
+        self.critic_llm = self.llm_handler.get_model("mistral-large-instruct")
         self.validator = ArticleSyntaxValidator()
         self.geonames = GeoNamesAPI()
         self.call_times = []
@@ -175,7 +177,7 @@ class ReflectiveCandidateGenerator:
 
         # compile final critic prompt and chain
         state.critic_prompt = _generate_critic_prompt()
-        chain = state.critic_prompt | self.llm
+        chain = state.critic_prompt | self.critic_llm
 
         try:
             # invoke critic and use feedback to generate reflected actor prompt
@@ -325,9 +327,11 @@ if __name__ == "__main__":
     generator = ReflectiveCandidateGenerator(
         llm_model_name="meta-llama-3.1-8b-instruct"
     )
-    generator.generate_graph_image()
-    # generator.reflectively_generate_candidates_for_evaluation(
-    #     seed=42,
-    #     nof_articles=100,
-    #     output_dir=f'output/reflective_candidate_generation/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_42_100_articles'
-    # )
+    #generator.generate_graph_image()
+    start = time.time()
+    generator.reflectively_generate_candidates_for_evaluation(
+        seed=42,
+        nof_articles=100,
+        output_dir=f'output/reflective_candidate_generation/llama_8b_with_mistral-large_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_42_100_articles'
+    )
+    print(f"Time taken: {time.time() - start} seconds.")

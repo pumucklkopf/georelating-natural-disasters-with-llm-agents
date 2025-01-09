@@ -23,13 +23,15 @@ string_seperator = "\n\n----------------------------------------\n"
 
 
 class ReflectiveCandidateGenerator:
-    def __init__(self, llm_model_name: str = "meta-llama-3.1-8b-instruct"):
+    def __init__(self,
+                 actor_model_name: str = "meta-llama-3.1-8b-instruct",
+                 critic_model_name: str = "meta-llama-3.1-8b-instruct"):
         load_dotenv()
         self.working_memory = WorkingMemory()
         self.data_handler = self.working_memory.few_shot_handler.data_handler
         self.llm_handler = ChatAIHandler()
-        self.llm = self.llm_handler.get_model(llm_model_name)
-        self.critic_llm = self.llm_handler.get_model("mistral-large-instruct")
+        self.llm = self.llm_handler.get_model(actor_model_name)
+        self.critic_llm = self.llm_handler.get_model(critic_model_name)
         self.validator = ArticleSyntaxValidator()
         self.geonames = GeoNamesAPI()
         self.call_times = []
@@ -54,7 +56,7 @@ class ReflectiveCandidateGenerator:
         # First check in which state of the reflective candidate generation we are
         if state.reflection_phase == ReflectionPhase.INITIAL_ACTOR_GENERATION:
             prompt = state.initial_prompt
-        elif state.reflection_phase == ReflectionPhase.REFLECTED_ACTOR_GENERATION:
+        elif state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR:
             prompt = state.reflected_prompt
         else:
             raise ValueError(f"Invalid reflection phase: {state.reflection_phase}")
@@ -106,14 +108,20 @@ class ReflectiveCandidateGenerator:
         return self.geonames.retrieve_candidates(state)
 
     def criticize(self, state: CandidateGenerationState) -> CandidateGenerationState:
-        if state.reflection_phase == ReflectionPhase.REFLECTED_ACTOR_GENERATION:
+        if state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR and state.fatal_errors:
             state.fatal_errors.append(Error(
                 execution_step=ExecutionStep.CRITIC,
                 error_message="Critique did not solve fatal errors. Exiting."
             ))
             return state
+        elif state.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS and state.invalid_toponyms:
+            return state             # still some invalid toponyms, but not fatal
+        elif state.fatal_errors:
+            state.reflection_phase = ReflectionPhase.CRITIC_GENERATION_FOR_FATAL_ERRORS
         else:
-            state.reflection_phase = ReflectionPhase.CRITIC_GENERATION
+            state.reflection_phase = ReflectionPhase.CRITIC_GENERATION_FOR_INVALID_TOPONYMS
+
+        # TODO: Fatal error critic phase
 
         def _generate_initial_generation_prompt_text() -> str:
             original_prompt_text = state.initial_prompt.format(
@@ -122,15 +130,13 @@ class ReflectiveCandidateGenerator:
                 input__toponym_list=str(state.toponyms)
             )
             generated_output = str(state.raw_output.content)
-            fatal_errors = str([error.model_dump() for error in state.fatal_errors])
 
             initial_generation_prompt_text = (
                 f"Original Prompt Text: \n {original_prompt_text + string_seperator}"
-                f"Generated Output: \n {generated_output+ string_seperator}\n\n"
-                f"Fatal Errors: \n {fatal_errors}")
+                f"Generated Output: \n {generated_output}")
             return initial_generation_prompt_text
 
-        def _generate_critic_prompt() -> PromptTemplate:
+        def _generate_critic_prompt_for_fatal_errors() -> PromptTemplate:
             critic_system_prompt = (
                 "System: \n"
                 "You are a constructive critic for the actor LLM which generated the output below. Please analyze the "
@@ -138,12 +144,39 @@ class ReflectiveCandidateGenerator:
                 "will be directly used to guide the actor LLM to generate better outputs in the future. Only provide "
                 "feedback to the errors, and be as concise as possible."
                 # Actionable feedback, c.g. Madaan et al. (2023) and Lauscher et al. (2024)
+                # TODO: creation-step specific feedback instructions for fatal errors
+            )
+            initial_generation_prompt = _generate_initial_generation_prompt_text()
+            fatal_errors = str([error.model_dump() for error in state.fatal_errors])
+            critic_instruction = "Your feedback:\n"
+
+            critic_prompt_text = (critic_system_prompt + string_seperator +
+                                  initial_generation_prompt + string_seperator +
+                                  f"Fatal Errors: \n {fatal_errors}" + string_seperator +
+                                  critic_instruction)
+            return PromptTemplate(
+                template=critic_prompt_text,
+                template_format="mustache",
+                input_variables=[]
+            )
+
+        def _generate_critic_prompt_for_invalid_toponyms() -> PromptTemplate:
+            critic_system_prompt = (
+                "System: \n"
+                "You are a constructive critic for the actor LLM which generated the output below. Please analyze the "
+                "invalid toponyms and corresponding errors in the generated output and provide actionable feedback to "
+                "fix them. Your feedback will be directly used to guide the actor LLM to generate better outputs in "
+                "the future. Only provide feedback to the invalid toponyms, not the others, and use the valid toponyms "
+                "as a reference. Be as concise as possible."
+                # Actionable feedback, c.g. Madaan et al. (2023) and Lauscher et al. (2024)
             )
             initial_generation_prompt = _generate_initial_generation_prompt_text()
             critic_instruction = "Your feedback:\n"
 
             critic_prompt_text = (critic_system_prompt + string_seperator +
                                   initial_generation_prompt + string_seperator +
+                                  f"Valid Toponyms with Candidates: \n {str(state.toponyms_with_candidates)}" + string_seperator +
+                                  f"Incorrect Toponyms with errors: \n {str(state.invalid_toponyms)}" + string_seperator +
                                   critic_instruction)
             return PromptTemplate(
                 template=critic_prompt_text,
@@ -159,11 +192,15 @@ class ReflectiveCandidateGenerator:
             )
             initial_generation_prompt_text = _generate_initial_generation_prompt_text()
             feedback = f"Actionable feedback by the critic: \n{str(state.critic_feedback.content)}"
-            reflective_actor_instruction_prompt_text = "Your new output in plain JSON:\n"
+            reflective_actor_instruction_prompt_text = (
+                "Now generate the search arguments ONLY for the invalid toponyms, NOT for the valid ones."
+                "Your new output in plain JSON:\n"
+            )
 
             reflected_prompt_text = (reflective_actor_system_prompt + string_seperator +
                                      initial_generation_prompt_text + string_seperator +
                                      feedback + string_seperator +
+                                        #todo include invalid toponyms !
                                      reflective_actor_instruction_prompt_text)
             return PromptTemplate(
                 template=reflected_prompt_text,
@@ -176,7 +213,10 @@ class ReflectiveCandidateGenerator:
             return lang_chain.invoke({})
 
         # compile final critic prompt and chain
-        state.critic_prompt = _generate_critic_prompt()
+        if state.fatal_errors:
+            state.critic_prompt = _generate_critic_prompt_for_fatal_errors()
+        else:
+            state.critic_prompt = _generate_critic_prompt_for_invalid_toponyms()
         chain = state.critic_prompt | self.critic_llm
 
         try:
@@ -184,10 +224,10 @@ class ReflectiveCandidateGenerator:
             critic_feedback = _invoke_critic(chain)
             state.critic_feedback = AIMessage(**critic_feedback.model_dump())
             state.reflected_prompt = _generate_reflected_actor_prompt()
-            state.reflection_phase = ReflectionPhase.REFLECTED_ACTOR_GENERATION
+            state.reflection_phase = ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR
 
-            # Reset the state for the next iteration of the reflective candidate generation
-            state.parsed_output = state.valid_toponyms = state.duplicate_toponyms = state.toponyms_with_candidates = state.fatal_errors = []
+            # Reset fatal errors for the next iteration of the reflective candidate generation
+            state.fatal_errors = []
             return state
 
         except Exception as e:
@@ -206,6 +246,14 @@ class ReflectiveCandidateGenerator:
             return "has_fatal_errors"
         else:
             return "successful"
+
+    def has_invalid_toponyms(selfself, state: CandidateGenerationState) -> str:
+        if state.fatal_errors:
+            return "has_fatal_errors"
+        else:
+            if state.invalid_toponyms:
+                return "has_invalid_toponyms"
+            return "only_valid_toponyms"
 
     def critique_was_successful(self, state: CandidateGenerationState) -> str:
         if state.fatal_errors:
@@ -251,10 +299,11 @@ class ReflectiveCandidateGenerator:
                                                 "successful": "retrieve_candidates"
                                             })
         graph_builder.add_conditional_edges("retrieve_candidates",
-                                            self.has_fatal_errors,
+                                            self.has_invalid_toponyms,
                                             {
                                                 "has_fatal_errors": "criticize",
-                                                "successful": END
+                                                "has_invalid_toponyms": "criticize",
+                                                "only_valid_toponyms": END
                                             })
         graph_builder.add_conditional_edges("criticize",
                                             self.critique_was_successful,
@@ -325,13 +374,14 @@ class ReflectiveCandidateGenerator:
 
 if __name__ == "__main__":
     generator = ReflectiveCandidateGenerator(
-        llm_model_name="meta-llama-3.1-8b-instruct"
+        actor_model_name="meta-llama-3.1-8b-instruct",
+        critic_model_name="meta-llama-3.1-8b-instruct"
     )
-    #generator.generate_graph_image()
-    start = time.time()
-    generator.reflectively_generate_candidates_for_evaluation(
-        seed=42,
-        nof_articles=100,
-        output_dir=f'output/reflective_candidate_generation/llama_8b_with_mistral-large_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_42_100_articles'
-    )
-    print(f"Time taken: {time.time() - start} seconds.")
+    generator.generate_graph_image()
+    # start = time.time()
+    # generator.reflectively_generate_candidates_for_evaluation(
+    #     seed=42,
+    #     nof_articles=100,
+    #     output_dir=f'output/reflective_candidate_generation/llama_8b_with_mistral-large_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_42_100_articles'
+    # )
+    # print(f"Time taken: {time.time() - start} seconds.")

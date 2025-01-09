@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 
 from agent_components.llms.chatAI import ChatAIHandler
 from agent_components.memory.working_memory import WorkingMemory
+from models.candidates import ReflectionPhase
 from models.errors import Error, ExecutionStep
 from models.llm_output import ToponymSearchArguments, ToponymSearchArgumentsWithErrors, ValidatedOutput, LLMOutput
 
@@ -216,15 +217,26 @@ class ArticleSyntaxValidator:
         self.geonames_syntax_validator = SearchParameterSyntaxValidator()
 
     def validate_toponyms_of_article(self, llm_output: LLMOutput) -> ValidatedOutput:
-        validated_output = ValidatedOutput(**llm_output.model_dump())
-
-        # needed for revision: set invalid to empty list
-        validated_output.invalid_toponyms = []
-
-        if validated_output.fatal_errors:
-            return validated_output
         try:
-            # First, we all parsed toponyms can either have valid syntax, invalid syntax, or be duplicates
+            validated_output = ValidatedOutput(**llm_output.model_dump())
+
+            # needed in baseline generation chain, not in agent graph
+            if validated_output.fatal_errors:
+                return validated_output
+
+            temp_gt_toponyms = [toponym.casefold() for toponym in validated_output.toponyms]
+
+            in_reflection_phase = False
+            if hasattr(validated_output, 'reflection_phase'):  # needed in candidate generation chain, not in agent graph
+                if validated_output.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
+                    in_reflection_phase = True
+                    for toponym_with_search_params in validated_output.parsed_output:
+                        toponym_with_search_params.generated_by_retry = True
+                    already_correct_toponyms = [topo.toponym.casefold() for topo in itertools.chain(
+                        validated_output.valid_toponyms, validated_output.duplicate_toponyms)]
+                    temp_gt_toponyms = temp_gt_toponyms - already_correct_toponyms
+
+            # First, all parsed toponyms can either have valid syntax, invalid syntax, or be duplicates
             for toponym_with_search_params in llm_output.parsed_output:
                 if toponym_with_search_params.params:
                     is_valid, errors = self.geonames_syntax_validator.validate(toponym_with_search_params.params)
@@ -253,13 +265,17 @@ class ArticleSyntaxValidator:
                         ]
                     ))
 
-            # if len(validated_output.toponyms) > 20 and len(validated_output.duplicate_toponyms) > 0:
-            #     print("hard example")
+            # Second, we need to check if the toponyms with valid syntax are actually in the article (both for valid
+            # and duplicate toponyms) create local copies of lists to avoid changing the original lists and allow
+            # stable iteration
 
-            # Second, we need to check if the toponyms with valid syntax are actually in the article (both for valid and duplicate toponyms)
-            temp_gt_toponyms = [toponym.casefold() for toponym in validated_output.toponyms]
-            valid_toponyms = validated_output.valid_toponyms.copy()
-            duplicate_toponyms = validated_output.duplicate_toponyms.copy()
+            if not in_reflection_phase:
+                valid_toponyms = validated_output.valid_toponyms.copy()
+                duplicate_toponyms = validated_output.duplicate_toponyms.copy()
+            else:
+                valid_toponyms = [valid for valid in validated_output.valid_toponyms if valid.generated_by_retry]
+                duplicate_toponyms = [duplicate for duplicate in validated_output.duplicate_toponyms if duplicate.generated_by_retry]
+
             for generation in itertools.chain(valid_toponyms, duplicate_toponyms):
                 if generation.toponym.casefold() in temp_gt_toponyms:
                     temp_gt_toponyms.remove(generation.toponym.casefold())
@@ -302,8 +318,6 @@ class ArticleSyntaxValidator:
             temp_toponym_list = [temp_toponym.toponym.casefold() for temp_toponym in (validated_output.valid_toponyms +
                                                                                       validated_output.duplicate_toponyms +
                                                                                       validated_output.invalid_toponyms)]
-            if len(temp_toponym_list) != len(validated_output.parsed_output): # indicates most probably a coding error
-                print("FATAL ERROR: PARSING OR VALIDATION ERROR for article ", validated_output.article_id)
             if len(temp_toponym_list) < len(validated_output.toponyms):  # too few toponyms generated
                 for mention in validated_output.toponyms:
                     if mention.casefold() not in temp_toponym_list:
@@ -318,6 +332,7 @@ class ArticleSyntaxValidator:
                         ))
                     else:
                         temp_toponym_list.remove(mention.casefold())
+
 
             # just for code validation
             nof_valid_invalid_duplicate = len([temp_toponym.toponym for temp_toponym in (validated_output.valid_toponyms +

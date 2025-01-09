@@ -11,8 +11,10 @@ from models.llm_output import ToponymSearchArguments, ValidatedOutput
 # enum of the possible phases of the reflective candidate generation
 class ReflectionPhase(str, Enum):
     INITIAL_ACTOR_GENERATION = "initial_actor_generation"
-    CRITIC_GENERATION = "critic_generation"
-    REFLECTED_ACTOR_GENERATION = "reflected_actor_generation"
+    CRITIC_GENERATION_FOR_FATAL_ERRORS = "critic_generation_for_fatal_errors"
+    CRITIC_GENERATION_FOR_INVALID_TOPONYMS = "critic_generation_for_invalid_toponyms"
+    ACTOR_RETRY_AFTER_FATAL_ERROR = "actor_retry_after_fatal_error"
+    ACTOR_RETRY_ON_INVALID_TOPONYMS = "actor_retry_on_invalid_toponyms"
 
 
 class ToponymWithCandidates(BaseModel):

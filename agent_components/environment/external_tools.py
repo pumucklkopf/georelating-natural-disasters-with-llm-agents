@@ -1,4 +1,3 @@
-import json
 import os
 import pickle
 import urllib.parse
@@ -25,6 +24,7 @@ class GeoNamesAPI:
         return response.json()
 
     def retrieve_candidates(self, validated_output: ValidatedOutput) -> CandidateGenerationOutput:
+        #todo only for new toponyms
         candidate_generation_output = CandidateGenerationOutput(**validated_output.model_dump())
         try:
             for toponym_to_search_for in validated_output.valid_toponyms:
@@ -50,6 +50,8 @@ class GeoNamesAPI:
                         break
             return candidate_generation_output
         except Exception as e:
+            # TODO: that's shit, because probably the generation was valid, but there is an issue with the external API
+            # TODO: --> how to handle that?
             candidate_generation_output.fatal_errors = [Error(execution_step=ExecutionStep.GEOAPI,
                                                               error_message=str(e))]
             return candidate_generation_output

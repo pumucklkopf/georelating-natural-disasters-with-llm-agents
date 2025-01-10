@@ -8,7 +8,7 @@ from tqdm import tqdm
 from agent_components.environment.internal_tools import OutputParser, ArticleSyntaxValidator
 from agent_components.llms.chatAI import ChatAIHandler
 from agent_components.memory.working_memory import WorkingMemory
-from models.candidates import ToponymWithCandidates, CandidateGenerationOutput
+from models.candidates import ToponymWithCandidates, CandidateGenerationOutput, ReflectionPhase
 from models.errors import Error, ExecutionStep
 from models.llm_output import ValidatedOutput
 
@@ -24,10 +24,15 @@ class GeoNamesAPI:
         return response.json()
 
     def retrieve_candidates(self, validated_output: ValidatedOutput) -> CandidateGenerationOutput:
-        #todo only for new toponyms
         candidate_generation_output = CandidateGenerationOutput(**validated_output.model_dump())
         try:
-            for toponym_to_search_for in validated_output.valid_toponyms:
+            topos_to_search = validated_output.valid_toponyms
+            correct_duplicates = validated_output.duplicate_toponyms
+            if hasattr(validated_output, 'reflection_phase'):
+                if validated_output.reflection_phase != ReflectionPhase.INITIAL_ACTOR_GENERATION:
+                    topos_to_search = [topo for topo in validated_output.valid_toponyms if topo.generated_by_retry]
+                    correct_duplicates = [topo for topo in validated_output.duplicate_toponyms if topo.generated_by_retry]
+            for toponym_to_search_for in topos_to_search:
                 response = self.search(toponym_to_search_for.params)
                 toponym_with_candidates = ToponymWithCandidates(
                     toponym_with_search_arguments=toponym_to_search_for,
@@ -36,7 +41,7 @@ class GeoNamesAPI:
                     nof_retrieved_candidates=len(response['geonames'])
                 )
                 candidate_generation_output.toponyms_with_candidates.append(toponym_with_candidates)
-            for duplicate_toponym in validated_output.duplicate_toponyms:
+            for duplicate_toponym in correct_duplicates:
                 for toponym_with_candidates in candidate_generation_output.toponyms_with_candidates:
                     if toponym_with_candidates.toponym_with_search_arguments.toponym.casefold() == duplicate_toponym.duplicate_of.casefold():
                         candidate_generation_output.toponyms_with_candidates.append(

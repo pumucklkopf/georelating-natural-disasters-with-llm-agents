@@ -50,8 +50,8 @@ class OutputParser:
             # if the string does not start with a '[', strip of the characters before the first '['
             if message.content[0] != '[':
                 message.content = message.content[message.content.find('['):]
-                if message.content[-1] != ']':
-                    message.content = message.content[:message.content.rfind(']') + 1]
+            if message.content[-1] != ']':
+                message.content = message.content[:message.content.rfind(']') + 1]
             for location_mention in json.loads(message.content):
                 parsed_output.append(ToponymSearchArguments.model_validate(location_mention))
             llm_output.parsed_output.extend(parsed_output)
@@ -152,7 +152,6 @@ class SearchParameterSyntaxValidator:
             self.errors.append("featureClass must be one or more of A,H,L,P,R,S,T,U,V.")
 
     def validate_featureCode(self):
-        # ToDo: Check if featureCode is a valid code according to https://www.geonames.org/export/codes.html
         if 'featureCode' in self.params and not isinstance(self.params['featureCode'], str):
             self.errors.append("featureCode must be a string.")
 
@@ -217,9 +216,8 @@ class ArticleSyntaxValidator:
         self.geonames_syntax_validator = SearchParameterSyntaxValidator()
 
     def validate_toponyms_of_article(self, llm_output: LLMOutput) -> ValidatedOutput:
+        validated_output = ValidatedOutput(**llm_output.model_dump())
         try:
-            validated_output = ValidatedOutput(**llm_output.model_dump())
-
             # needed in baseline generation chain, not in agent graph
             if validated_output.fatal_errors:
                 return validated_output
@@ -227,17 +225,19 @@ class ArticleSyntaxValidator:
             temp_gt_toponyms = [toponym.casefold() for toponym in validated_output.toponyms]
 
             in_reflection_phase = False
-            if hasattr(validated_output, 'reflection_phase'):  # needed in candidate generation chain, not in agent graph
-                if validated_output.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
+            if hasattr(llm_output, 'reflection_phase'):  # needed in candidate generation chain, not in agent graph
+                if llm_output.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
                     in_reflection_phase = True
                     for toponym_with_search_params in validated_output.parsed_output:
                         toponym_with_search_params.generated_by_retry = True
                     already_correct_toponyms = [topo.toponym.casefold() for topo in itertools.chain(
                         validated_output.valid_toponyms, validated_output.duplicate_toponyms)]
-                    temp_gt_toponyms = temp_gt_toponyms - already_correct_toponyms
+                    # remove already correct toponyms from the list of toponyms to generate
+                    for correct_topo in already_correct_toponyms:
+                        temp_gt_toponyms.remove(correct_topo)
 
             # First, all parsed toponyms can either have valid syntax, invalid syntax, or be duplicates
-            for toponym_with_search_params in llm_output.parsed_output:
+            for toponym_with_search_params in validated_output.parsed_output:
                 if toponym_with_search_params.params:
                     is_valid, errors = self.geonames_syntax_validator.validate(toponym_with_search_params.params)
                     if is_valid:
@@ -295,7 +295,9 @@ class ArticleSyntaxValidator:
                         validated_output.duplicate_toponyms.remove(generation)
 
             # Third, we need to check if all duplicates reference a valid toponym
-            duplicate_toponyms = validated_output.duplicate_toponyms.copy()
+            if in_reflection_phase:
+                duplicate_toponyms = [duplicate for duplicate in validated_output.duplicate_toponyms if
+                                      duplicate.generated_by_retry]
             for duplicate in duplicate_toponyms:
                 valid_duplicate = False
                 for valid_toponym in validated_output.valid_toponyms:  # harsh because duplicate could also be correctly referring to an invalid toponym
@@ -313,6 +315,17 @@ class ArticleSyntaxValidator:
                         ]
                     ))
                     validated_output.duplicate_toponyms.remove(duplicate)
+
+            if in_reflection_phase:
+                # remove the newly generated toponyms from the list of invalid toponyms
+                for new_topo in itertools.chain(validated_output.valid_toponyms, validated_output.duplicate_toponyms,
+                                            validated_output.invalid_toponyms):
+                    if new_topo.generated_by_retry:
+                        for invalid_topo in validated_output.invalid_toponyms:
+                            if not invalid_topo.generated_by_retry:
+                                if new_topo.toponym.casefold() == invalid_topo.toponym.casefold():
+                                    validated_output.invalid_toponyms.remove(invalid_topo)
+                                    break
 
             # the sum of all generated toponyms
             temp_toponym_list = [temp_toponym.toponym.casefold() for temp_toponym in (validated_output.valid_toponyms +

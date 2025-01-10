@@ -19,6 +19,7 @@ class WorkingMemory:
             ("documentation", self.long_term_memory.documentation_prompt),
             ("few_shot_examples", self.few_shot_handler.few_shot_template)
         ]
+        # ToDo redo prompt to properly format double quotes
         return PipelinePromptTemplate(
             final_prompt=final_prompt,
             pipeline_prompts=pipeline_prompts,

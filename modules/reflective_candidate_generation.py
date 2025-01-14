@@ -1,5 +1,7 @@
+import json
 import pickle
 import os
+import random
 import time
 
 import pandas as pd
@@ -8,6 +10,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import PromptTemplate
 from langgraph.constants import END
 from langgraph.graph import StateGraph
+from openai import InternalServerError
 from tqdm import tqdm
 
 from agent_components.environment.external_tools import GeoNamesAPI
@@ -25,7 +28,8 @@ string_seperator = "\n\n----------------------------------------\n"
 class ReflectiveCandidateGenerator:
     def __init__(self,
                  actor_model_name: str = "meta-llama-3.1-8b-instruct",
-                 critic_model_name: str = "meta-llama-3.1-8b-instruct"):
+                 critic_model_name: str = "meta-llama-3.1-8b-instruct",
+                 call_times: list = None):
         load_dotenv()
         self.working_memory = WorkingMemory()
         self.data_handler = self.working_memory.few_shot_handler.data_handler
@@ -34,7 +38,7 @@ class ReflectiveCandidateGenerator:
         self.critic_llm = self.llm_handler.get_model(critic_model_name)
         self.validator = ArticleSyntaxValidator()
         self.geonames = GeoNamesAPI()
-        self.call_times = []
+        self.call_times = call_times if call_times else []
 
     """
     Node functions
@@ -65,7 +69,6 @@ class ReflectiveCandidateGenerator:
             prompt = state.initial_prompt
         else:
             prompt = state.reflected_prompt
-        # Build the LLM call sub-chain
 
         @handle_api_errors(call_times=self.call_times)
         def _invoke_llm(input_prompt: str):
@@ -74,11 +77,21 @@ class ReflectiveCandidateGenerator:
         try:
             llm_answer = _invoke_llm(prompt)
 
-            return LLMOutput(
-                article_id=state.article_id,
-                toponyms=state.toponyms,
-                raw_output=AIMessage(**llm_answer.model_dump())
-            )
+            if type(llm_answer) == InternalServerError:
+                return LLMOutput(
+                    article_id=state.article_id,
+                    toponyms=state.toponyms,
+                    fatal_errors=[Error(
+                        execution_step=ExecutionStep.ACTOR,
+                        error_message=llm_answer.message
+                    )]
+                )
+            else:
+                return LLMOutput(
+                    article_id=state.article_id,
+                    toponyms=state.toponyms,
+                    raw_output=AIMessage(**llm_answer.model_dump())
+                )
         except Exception as e:
             return LLMOutput(
                 article_id=state.article_id,
@@ -110,8 +123,13 @@ class ReflectiveCandidateGenerator:
     def criticize(self, state: CandidateGenerationState) -> CandidateGenerationState:
         def _generate_initial_generation_prompt_text() -> str:
             generated_output = str(state.raw_output.content)
+
+            # exclude documentation from the initial prompt to make it shorter
+            docu_string = self.working_memory.long_term_memory.create_documentation_message().format()
+            initial_prompt = state.initial_prompt.replace(docu_string, "")
+
             initial_generation_prompt_text = (
-                f"Original Prompt Text: \n {state.initial_prompt + string_seperator}"
+                f"Original Prompt Text: \n {initial_prompt + string_seperator}"
                 f"Generated Output: \n {generated_output}")
             return initial_generation_prompt_text
 
@@ -120,10 +138,9 @@ class ReflectiveCandidateGenerator:
                 "System: \n"
                 "You are a constructive critic for the actor LLM. Please analyze the errors in the generated output "
                 "and provide actionable feedback to fix them. Your feedback will be directly used to guide the actor "
-                "LLM to generate better outputs in the future. Only provide feedback to the errors under the Fatal "
-                "Errors key, nothing else, and be as concise as possible."
+                "LLM to generate better outputs in the future. Focus on identifying the specific execution step where "
+                "the error occurred and provide feedback ONLY for the cause of this error. Be as concise as possible."
                 # Actionable feedback, c.g. Madaan et al. (2023) and Lauscher et al. (2024)
-                # TODO: creation-step specific feedback instructions for fatal errors
             )
             initial_generation_prompt = _generate_initial_generation_prompt_text()
             fatal_errors = str([error.model_dump() for error in state.fatal_errors])
@@ -144,20 +161,34 @@ class ReflectiveCandidateGenerator:
             critic_system_prompt = (
                 "System: \n"
                 "You are a constructive critic for the actor LLM which generated the output below. Please analyze the "
-                "invalid toponyms and corresponding errors in the generated output and provide actionable feedback to "
-                "fix them. Your feedback will be directly used to guide the actor LLM to generate better outputs in "
-                "the future. Only provide feedback to the invalid toponyms, not the others, and use the valid toponyms "
-                "as a reference. Be as concise as possible."
+                "invalid toponyms and their corresponding errors in the generated output. Provide actionable feedback "
+                "to fix these errors. Make sure your feedback adheres closely to the instructions in the original "
+                "prompt. Your feedback will be directly used to guide the actor LLM to generate better outputs in the "
+                "future. Focus only on the invalid toponyms based on the error message for each of them, using the "
+                "valid toponyms as a reference. Be as concise as possible and ensure to include every invalid toponym "
+                "provided below."
                 # Actionable feedback, c.g. Madaan et al. (2023) and Lauscher et al. (2024)
-                # TODO enhance darstellung von valid and invalid topos (lists to dicts or something)
             )
             initial_generation_prompt = _generate_initial_generation_prompt_text()
+
+            valid_examples, valid_examples_text = [], ""
+            if len(state.valid_toponyms) > 2:
+                valid_examples = [f"{topo.model_dump_json(indent=4)},\n" for topo in random.sample(state.valid_toponyms, 2)]
+            if len(state.duplicate_toponyms) > 2:
+                valid_examples.extend([f"{topo.model_dump_json(indent=4)},\n" for topo in random.sample(state.duplicate_toponyms, 2)])
+            if valid_examples:
+                valid_examples = "".join(valid_examples)
+                valid_examples_text = f"Some valid generations for reference: \n [{valid_examples}]"
+            invalid_toponyms = [f"{topo.model_dump_json(indent=4)},\n" for topo in state.invalid_toponyms]
+            invalid_toponyms = "".join(invalid_toponyms)
+            invalid_toponyms_text = f"All incorrect toponyms with errors: \n [{invalid_toponyms}]"
+            # TODO: Check if new format of topos is better
             critic_instruction = "Your feedback:\n"
 
             critic_prompt_text = (critic_system_prompt + string_seperator +
                                   initial_generation_prompt + string_seperator +
-                                  f"Valid Toponyms with Candidates: \n {str(state.toponyms_with_candidates)}" + string_seperator +  #todo not all valids to include?
-                                  f"Incorrect Toponyms with errors: \n {str(state.invalid_toponyms)}" + string_seperator +
+                                  valid_examples_text + string_seperator +
+                                  invalid_toponyms_text + string_seperator +
                                   critic_instruction)
             prompt = PromptTemplate(
                 template=critic_prompt_text,
@@ -200,9 +231,8 @@ class ReflectiveCandidateGenerator:
 
         @handle_api_errors(call_times=self.call_times)
         def _invoke_llm(input_prompt: str):
-            return self.llm.invoke(input_prompt)
+            return self.critic_llm.invoke(input_prompt)
 
-        # todo: what to do if fatal error occurs in actor_retry_on_invalid_toponyms?
         # compile final critic prompt
         if state.fatal_errors:
             state.reflection_phase = ReflectionPhase.CRITIC_GENERATION_FOR_FATAL_ERRORS
@@ -214,7 +244,14 @@ class ReflectiveCandidateGenerator:
         try:
             # invoke critic and use feedback to generate reflected actor prompt
             critic_feedback = _invoke_llm(state.critic_prompt)
-            state.critic_feedback = AIMessage(**critic_feedback.model_dump())
+            if not type(critic_feedback) == InternalServerError:
+                state.critic_feedback = AIMessage(**critic_feedback.model_dump())
+            else:
+                state.fatal_errors.append(Error(
+                    execution_step=ExecutionStep.CRITIC,
+                    error_message=critic_feedback.message
+                ))
+                return state
 
             # generate the matching reflected actor prompt
             if state.reflection_phase == ReflectionPhase.CRITIC_GENERATION_FOR_FATAL_ERRORS:
@@ -242,13 +279,39 @@ class ReflectiveCandidateGenerator:
             ))
         return state
 
+    def resolve_candidates(self, state: CandidateGenerationState):
+        """
+        Resolve the candidates retrieved from the GeoNames API to one correct toponym.
+        :param state: The current state of the reflective candidate generation.
+        :return: The updated state of the reflective candidate generation.
+        """
+        # Get the list of toponyms with candidates
+        toponyms_with_candidates = state.toponyms_with_candidates
+        instructions = (f"System: \n"
+                        f"You are an expert with comprehensive geographical knowledge. Your task is to select the "
+                        f"right candidate out of the options provided to you for every single toponym. You should "
+                        f"use your geographic understanding to reason why a certain candidate is the correct one for "
+                        f"the given toponym provided the context of the news article. Be as precise as possible and "
+                        f"ensure to select the most relevant candidate for each toponym.\n"
+                        f"If you are very sure that none of the candidates fits the toponym, you can also select "
+                        f"None as the selected candidate and provide your reason in detail.\n")
+        # load example from json file
+        with open("data/few_shot_examples_selection.json", "r") as f:
+            example = json.load(f)
+        example_text = (f"Example: \n"
+                        f"Title: {example.title}\n"
+                        f"News Article: {example.news_article}\n"
+                        f"Toponyms with candidates: \n{example.toponyms_with_candidates}\n"
+                        f"Output: \n{example.ground_truth}\n")
+
     """
     Routing functions
     """
 
     def has_fatal_errors(self, state: CandidateGenerationState) -> str:
         if state.fatal_errors:
-            if state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR:
+            if state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR or \
+                    state.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
                 return "critique_did_not_solve_fatal_errors"
             else:
                 return "has_fatal_errors"
@@ -384,15 +447,45 @@ class ReflectiveCandidateGenerator:
 
 
 if __name__ == "__main__":
+    call_times = []
+    for actor in ["llama-3.3-70b-instruct", "mistral-large-instruct"]:
+        for critic in ["meta-llama-3.1-8b-instruct", "llama-3.3-70b-instruct", "mistral-large-instruct"]:
+            seed = 24
+            nof_articles = 100
+
+            generator = ReflectiveCandidateGenerator(
+                actor_model_name=actor,
+                critic_model_name=critic,
+                call_times=call_times
+            )
+
+            start = time.time()
+            generator.reflectively_generate_candidates_for_evaluation(
+                seed=seed,
+                nof_articles=nof_articles,
+                output_dir=f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+
+            )
+            call_times.extend(generator.call_times)
+            print(f"Time taken: {time.time() - start} seconds.")
+
+
+    actor = "meta-llama-3.1-8b-instruct"  # ["meta-llama-3.1-8b-instruct", "llama-3.3-70b-instruct", "mistral-large-instruct"]
+    critic = "meta-llama-3.1-8b-instruct"
+
     generator = ReflectiveCandidateGenerator(
-        actor_model_name="meta-llama-3.1-8b-instruct",
-        critic_model_name="meta-llama-3.1-8b-instruct"
+        actor_model_name=actor,
+        critic_model_name=critic,
+        call_times=call_times
     )
+
     # generator.generate_graph_image()
+
     start = time.time()
     generator.reflectively_generate_candidates_for_evaluation(
-        seed=42,
-        nof_articles=100,
-        output_dir=f'output/reflective_candidate_generation/llama_8b_with_llama_8b_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_42_100_articles'
+        seed=seed,
+        nof_articles=nof_articles,
+        # output_dir="output/reflective_candidate_generation/mistral-large-instruct_with_mistral-large-instruct_critic/20250112_seed_42_100_articles_2"
+        output_dir=f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
     )
     print(f"Time taken: {time.time() - start} seconds.")

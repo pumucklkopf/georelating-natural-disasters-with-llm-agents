@@ -57,7 +57,7 @@ class OutputParser:
             llm_output.parsed_output.extend(parsed_output)
             return llm_output
         except Exception as e:
-            error = f"Error parsing output or loading JSON format: {e}"
+            error = f"Error while parsing output: The generated content does not seem to be valid JSON. Error: {e}"
             llm_output.fatal_errors = [Error(execution_step=ExecutionStep.SEARCHOUTPUTPARSER, error_message=error)]
             return llm_output
 
@@ -260,7 +260,8 @@ class ArticleSyntaxValidator:
                         errors_per_toponym=[
                             Error(
                                 execution_step=ExecutionStep.SEARCHPARAMETERVALIDATOR,
-                                error_message="None of search parameter or duplicate key provided."
+                                error_message="Toponym without a valid search parameter (params) or duplicate ("
+                                              "duplicate_of) key."
                             )
                         ]
                     ))
@@ -285,7 +286,8 @@ class ArticleSyntaxValidator:
                         errors_per_toponym=[
                             Error(
                                 execution_step=ExecutionStep.SEARCHPARAMETERVALIDATOR,
-                                error_message="Generation does not reference a toponym in the article."
+                                error_message="Generation does not reference a toponym in the article. Only generate "
+                                              "search parameters for the toponyms provided under the toponyms key!"
                             )
                         ]
                     ))
@@ -298,6 +300,8 @@ class ArticleSyntaxValidator:
             if in_reflection_phase:
                 duplicate_toponyms = [duplicate for duplicate in validated_output.duplicate_toponyms if
                                       duplicate.generated_by_retry]
+            else:
+                duplicate_toponyms = validated_output.duplicate_toponyms.copy()
             for duplicate in duplicate_toponyms:
                 valid_duplicate = False
                 for valid_toponym in validated_output.valid_toponyms:  # harsh because duplicate could also be correctly referring to an invalid toponym
@@ -310,7 +314,8 @@ class ArticleSyntaxValidator:
                         errors_per_toponym=[
                             Error(
                                 execution_step=ExecutionStep.SEARCHPARAMETERVALIDATOR,
-                                error_message="Duplicate toponym does not reference a valid generated toponym."
+                                error_message="Duplicate toponym was generated correctly, but does not reference a "
+                                              "valid generated toponym under the duplicate_of key."
                             )
                         ]
                     ))
@@ -339,7 +344,7 @@ class ArticleSyntaxValidator:
                             errors_per_toponym=[
                                 Error(
                                     execution_step=ExecutionStep.SEARCHPARAMETERVALIDATOR,
-                                    error_message="No valid search arguments generated."
+                                    error_message="No search arguments were generated for this toponym."
                                 )
                             ]
                         ))

@@ -10,7 +10,7 @@ class LongTermMemory:
         self.documentation = self._load_documentation()
         self.system_instructions_prompt = self._create_system_instructions()
         self.task_instructions_prompt = self._create_task_instructions()
-        self.documentation_prompt = self._create_documentation_message()
+        self.documentation_prompt = self.create_documentation_message()
 
     def _load_documentation(self):
         loader = TextLoader(self.documentation_file, encoding='utf-8')
@@ -51,7 +51,7 @@ class LongTermMemory:
             input_variables=[]
         )
 
-    def _create_documentation_message(self):
+    def create_documentation_message(self):
         return PromptTemplate.from_template(
             f"Here is the documentation for the GeoNames Websearch API provided in Markdown:\n"
             f"{self.documentation[0].page_content}"

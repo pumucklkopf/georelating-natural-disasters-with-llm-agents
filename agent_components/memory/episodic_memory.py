@@ -10,7 +10,7 @@ from langchain_community.document_loaders import JSONLoader
 from data_handler.xml_parsing import XMLDataHandler
 
 class EpisodicMemory:
-    FEW_SHOT_EXAMPLE_PATH = 'data/few_shot_examples.json'
+    FEW_SHOT_EXAMPLE_PATH = 'data/few_shot_examples_generation.json'
 
     def __init__(self, data_directory: str, xml_file: str):
         self.data_handler = XMLDataHandler(data_directory)

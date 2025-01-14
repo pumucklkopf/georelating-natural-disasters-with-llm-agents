@@ -31,26 +31,24 @@ class CandidateGenerator:
         article_id = article['docid']
         toponyms = self.data_handler.get_short_toponyms_for_article(article_id)
         parser = OutputParser(article_id=article_id, toponym_list=toponyms)
+        prompt = self.working_memory.create_final_prompt().format(input__heading=article['title'],
+                                                                  input__news_article=article['text'],
+                                                                  input__toponym_list=str(toponyms))
+        prompt = prompt.replace("&quot;", "\"") # TODO: Remove this line when the issue is fixed in mustache
 
         # Build the processing chain
         chain = (
-            self.working_memory.create_final_prompt()
-            | self.llm
+            self.llm
             | parser.extract_output
             | self.validator.validate_toponyms_of_article
             | self.geonames.retrieve_candidates
         )
 
         @handle_api_errors(call_times=self.call_times)
-        def _invoke_chain(input_dict: dict):
-            return chain.invoke(input_dict)
+        def _invoke_chain(input_prompt: str):
+            return chain.invoke(input_prompt)
 
-
-        llm_answer = _invoke_chain({
-            "input__heading": article['title'],
-            "input__news_article": article['text'],
-            "input__toponym_list": str(toponyms)
-        })
+        llm_answer = _invoke_chain(prompt)
 
         return llm_answer
 
@@ -78,7 +76,7 @@ class CandidateGenerator:
                 content_to_save = CandidateGenerationOutput(
                     article_id=article_id,
                     fatal_errors=[Error(
-                        execution_step=ExecutionStep.LLM,
+                        execution_step=ExecutionStep.ACTOR,
                         error_message=str(llm_answer)
                     )]
 
@@ -92,14 +90,14 @@ class CandidateGenerator:
 
 
 if __name__ == "__main__":
-    seed = 42
+    seed = 24
     nof_articles = 100
     candidate_generator = CandidateGenerator(
-       llm_model_name="mistral-large-instruct"
+       #llm_model_name="meta-llama-3.1-8b-instruct"
     )
     start = time.time()
     candidate_generator.generate_candidates_for_evaluation(
         seed=seed,
         nof_articles=nof_articles,
-        output_dir=f'output/baseline_candidate_generation/mistral-large/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles')
+        output_dir=f'output/baseline_candidate_generation/llama_8b/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles_2')
     print(f"Processing {nof_articles} articles took {time.time() - start:.2f} seconds.")

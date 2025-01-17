@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage
 
 from agent_components.llms.chatAI import ChatAIHandler
 from agent_components.memory.working_memory import WorkingMemory
-from models.candidates import ReflectionPhase
+from models.candidates import ReflectionPhase, ResolvedToponym, GeoCodingState, ResolvedToponymWithErrors
 from models.errors import Error, ExecutionStep
 from models.llm_output import ToponymSearchArguments, ToponymSearchArgumentsWithErrors, ValidatedOutput, LLMOutput
 
@@ -34,32 +34,102 @@ def _is_valid_countrycode(code):
 
 
 class OutputParser:
-    def __init__(self, article_id: str, toponym_list: list[str]):
+    def __init__(self, article_id: str = "", toponym_list=None):
+        if toponym_list is None:
+            toponym_list = [""]
         self.article_id = article_id
         self.toponym_list = toponym_list
 
-    def extract_output(self, message: AIMessage) -> LLMOutput:
-        parsed_output = []
+    @staticmethod
+    def clean_and_parse_json_content(content: str):
+        """
+        Ensures the content is valid JSON by removing characters before the first '['
+        and after the last ']'. Then parses the JSON content.
+
+        Args:
+            content (str): The raw content to be cleaned and parsed.
+
+        Returns:
+            list: The parsed JSON content as a Python object.
+
+        Raises:
+            ValueError: If the content is not valid JSON.
+        """
+        if content[0] != '[':
+            content = content[content.find('['):]
+        if content[-1] != ']':
+            content = content[:content.rfind(']') + 1]
+        return json.loads(content)
+
+    @staticmethod
+    def handle_parsing_error(e: Exception, step: ExecutionStep):
+        """
+        Creates an error message for a parsing error.
+
+        Args:
+            e (Exception): The exception raised during parsing.
+            step (ExecutionStep): The step where the error occurred.
+
+        Returns:
+            Error: The constructed error object.
+        """
+        error_message = f"Error while parsing output: The generated content does not seem to be valid JSON. Error: {e}"
+        return Error(execution_step=step, error_message=error_message)
+
+    @staticmethod
+    def handle_exceptions(step: ExecutionStep):
+        """
+        Decorator to handle exceptions during parsing and add an error to the relevant state or output.
+
+        Args:
+            step (ExecutionStep): The step where the error occurred.
+        """
+
+        def decorator(func):
+            def wrapper(*args, **kwargs):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    error = OutputParser.handle_parsing_error(e, step)
+                    if isinstance(args[1], GeoCodingState):  # Handle GeoCodingState
+                        args[1].resolution_fatal_errors.append(error)
+                        return args[1]
+                    elif isinstance(args[1], AIMessage):  # Handle LLMOutput
+                        output = LLMOutput(
+                            article_id=args[0].article_id,
+                            toponyms=args[0].toponym_list,
+                            raw_output=args[1].model_copy(),
+                            parsed_output=[],
+                            fatal_errors=[error]
+                        )
+                        return output
+
+            return wrapper
+
+        return decorator
+
+    @handle_exceptions(ExecutionStep.SEARCHOUTPUTPARSER)
+    def extract_generation_output(self, message: AIMessage) -> LLMOutput:
+        parsed_output = [
+            ToponymSearchArguments.model_validate(location_mention)
+            for location_mention in self.clean_and_parse_json_content(message.content)
+        ]
         llm_output = LLMOutput(
             article_id=self.article_id,
             toponyms=self.toponym_list,
             raw_output=message.model_copy(),
-            parsed_output=[]
+            parsed_output=parsed_output
         )
-        try:
-            # if the string does not start with a '[', strip of the characters before the first '['
-            if message.content[0] != '[':
-                message.content = message.content[message.content.find('['):]
-            if message.content[-1] != ']':
-                message.content = message.content[:message.content.rfind(']') + 1]
-            for location_mention in json.loads(message.content):
-                parsed_output.append(ToponymSearchArguments.model_validate(location_mention))
-            llm_output.parsed_output.extend(parsed_output)
-            return llm_output
-        except Exception as e:
-            error = f"Error while parsing output: The generated content does not seem to be valid JSON. Error: {e}"
-            llm_output.fatal_errors = [Error(execution_step=ExecutionStep.SEARCHOUTPUTPARSER, error_message=error)]
-            return llm_output
+        return llm_output
+
+    @handle_exceptions(ExecutionStep.SEARCHOUTPUTPARSER)
+    def extract_resolution_output(self, state: GeoCodingState):
+        resolved_toponyms = [
+            ResolvedToponym.model_validate(location_mention)
+            for location_mention in self.clean_and_parse_json_content(state.resolution_raw_output.content)
+        ]
+        state.geocoded_toponyms.extend(resolved_toponyms)
+        return state
 
 
 class SearchParameterSyntaxValidator:
@@ -275,7 +345,8 @@ class ArticleSyntaxValidator:
                 duplicate_toponyms = validated_output.duplicate_toponyms.copy()
             else:
                 valid_toponyms = [valid for valid in validated_output.valid_toponyms if valid.generated_by_retry]
-                duplicate_toponyms = [duplicate for duplicate in validated_output.duplicate_toponyms if duplicate.generated_by_retry]
+                duplicate_toponyms = [duplicate for duplicate in validated_output.duplicate_toponyms if
+                                      duplicate.generated_by_retry]
 
             for generation in itertools.chain(valid_toponyms, duplicate_toponyms):
                 if generation.toponym.casefold() in temp_gt_toponyms:
@@ -324,7 +395,7 @@ class ArticleSyntaxValidator:
             if in_reflection_phase:
                 # remove the newly generated toponyms from the list of invalid toponyms
                 for new_topo in itertools.chain(validated_output.valid_toponyms, validated_output.duplicate_toponyms,
-                                            validated_output.invalid_toponyms):
+                                                validated_output.invalid_toponyms):
                     if new_topo.generated_by_retry:
                         for invalid_topo in validated_output.invalid_toponyms:
                             if not invalid_topo.generated_by_retry:
@@ -351,19 +422,19 @@ class ArticleSyntaxValidator:
                     else:
                         temp_toponym_list.remove(mention.casefold())
 
-
             # just for code validation
-            nof_valid_invalid_duplicate = len([temp_toponym.toponym for temp_toponym in (validated_output.valid_toponyms +
-                                                                                   validated_output.duplicate_toponyms +
-                                                                                   validated_output.invalid_toponyms)])
+            nof_valid_invalid_duplicate = len(
+                [temp_toponym.toponym for temp_toponym in (validated_output.valid_toponyms +
+                                                           validated_output.duplicate_toponyms +
+                                                           validated_output.invalid_toponyms)])
 
             nof_valid_duplicate = len([temp_toponym.toponym for temp_toponym in (validated_output.valid_toponyms +
-                                                                            validated_output.duplicate_toponyms)])
+                                                                                 validated_output.duplicate_toponyms)])
 
             correct_nof_toponyms = len(validated_output.toponyms)
             if nof_valid_invalid_duplicate < correct_nof_toponyms:  # indicates most probably a coding error
                 print("FATAL ERROR: TOO FEW TOPONYMS: VALIDATION ERROR for article ", validated_output.article_id)
-            if nof_valid_duplicate > correct_nof_toponyms: # indicates most probably a coding error
+            if nof_valid_duplicate > correct_nof_toponyms:  # indicates most probably a coding error
                 print("FATAL ERROR: TOO MANY TOPONYMS: VALIDATION ERROR for article ", validated_output.article_id)
 
             return validated_output
@@ -371,6 +442,60 @@ class ArticleSyntaxValidator:
             validated_output.fatal_errors = [Error(execution_step=ExecutionStep.ARTICLESYNTAXVALIDATOR,
                                                    error_message=str(e))]
             return validated_output
+
+
+class ResolutionSyntaxValidator:
+
+    def validate_resolution(self, state: GeoCodingState) -> GeoCodingState:
+        """
+        Validate the syntax of the resolved toponyms
+        :param state: GeoCodingState - The graph state containing the resolved toponyms
+        :return: GeoCodingState - The graph state additionally containing the validated resolved toponyms
+        """
+        try:
+            temp_gt_toponyms = [toponym.toponym_with_search_arguments.toponym.casefold()
+                                for toponym in state.toponyms_with_candidates]
+            for resolved_toponym in state.geocoded_toponyms:
+                errors = []
+                if not isinstance(resolved_toponym.toponym, str):
+                    errors.append("Toponym must be a string.")
+                if not isinstance(resolved_toponym.reasoning, str):
+                    errors.append("Reasoning must be a string.")
+                if not _is_integer(resolved_toponym.selected_candidate_geonameId):
+                    errors.append("Selected candidate geonameId must be an integer.")
+
+                if not resolved_toponym.toponym.casefold() in temp_gt_toponyms:
+                    errors.append("Resolved toponym does not reference a toponym in the article.")
+                else:
+                    temp_gt_toponyms.remove(resolved_toponym.toponym.casefold())
+
+                if errors:
+                    resolved_toponym_with_errors = ResolvedToponymWithErrors(
+                        **resolved_toponym.model_dump(),
+                        errors=[Error(
+                            execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
+                            error_message=str(errors))]
+                    )
+                    state.invalid_geocoded_toponyms.append(resolved_toponym_with_errors)
+                else:
+                    state.valid_geocoded_toponyms.append(resolved_toponym)
+
+            if temp_gt_toponyms:
+                for toponym in temp_gt_toponyms:
+                    state.invalid_geocoded_toponyms.append(ResolvedToponymWithErrors(
+                        toponym=toponym,
+                        reasoning="",
+                        selected_candidate_geonameId=0,
+                        errors=[Error(
+                            execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
+                            error_message="LLM resolution step is missing a generation for this toponym.")]
+                    ))
+
+            return state
+        except Exception as e:
+            state.resolution_fatal_errors.append(Error(execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
+                                            error_message=str(e)))
+            return state
 
 
 # test case
@@ -387,7 +512,7 @@ if __name__ == "__main__":
         tops = str(toponyms)
         parser = OutputParser(article_id=article_id, toponym_list=toponyms)
         validator = ArticleSyntaxValidator()
-        chain = prompt | llm | parser.extract_output | validator.validate_toponyms_of_article
+        chain = prompt | llm | parser.extract_generation_output | validator.validate_toponyms_of_article
         llm_answer = chain.invoke(
             {
                 "input__heading": article.get('title'),

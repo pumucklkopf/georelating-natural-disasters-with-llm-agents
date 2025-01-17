@@ -63,7 +63,7 @@ class ChatAIHandler:
             return ChatOpenAI(api_key=self.api_key,
                               base_url=self.base_url,
                               max_retries=1,
-                              timeout=httpx.Timeout(60.0),
+                              timeout=httpx.Timeout(300.0),
                               model_name=model_name,
                               temperature=temperature,
                               top_p=top_p)

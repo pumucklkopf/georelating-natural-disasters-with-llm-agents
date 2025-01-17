@@ -45,7 +45,8 @@ def handle_api_errors(call_times):
                         call_times.pop(0)
 
                     if len(call_times) > DAILY_RATE_LIMIT:
-                        time_to_sleep = call_times[0] + 86400 - now
+                        # sleep until 12am EST
+                        time_to_sleep = 86400 - (now % 86400)
                         print(
                             f"\nDaily rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)

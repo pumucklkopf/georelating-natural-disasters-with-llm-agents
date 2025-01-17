@@ -29,7 +29,7 @@ class GeoNamesAPI:
             topos_to_search = validated_output.valid_toponyms
             correct_duplicates = validated_output.duplicate_toponyms
             if hasattr(validated_output, 'reflection_phase'):
-                if validated_output.reflection_phase != ReflectionPhase.INITIAL_ACTOR_GENERATION:
+                if validated_output.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
                     topos_to_search = [topo for topo in validated_output.valid_toponyms if topo.generated_by_retry]
                     correct_duplicates = [topo for topo in validated_output.duplicate_toponyms if topo.generated_by_retry]
             for toponym_to_search_for in topos_to_search:
@@ -75,7 +75,7 @@ if __name__ == "__main__":
         tops = str(toponyms)
         parser = OutputParser(article_id=article_id, toponym_list=toponyms)
         validator = ArticleSyntaxValidator()
-        chain = prompt | llm | parser.extract_output | validator.validate_toponyms_of_article | geonames.retrieve_candidates
+        chain = prompt | llm | parser.extract_generation_output | validator.validate_toponyms_of_article | geonames.retrieve_candidates
         llm_answer = chain.invoke(
             {
                 "input__heading": article.get('title'),

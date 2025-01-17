@@ -10,6 +10,8 @@ class ExecutionStep(Enum):
     GEOAPI = "geonames_search_api"
     ACTOR = "actor_llm_generation"
     CRITIC = "critic_llm_generation"
+    RESOLUTION_ACTOR = "resolution_actor"
+    RESOLUTIONSYNTAXVALIDATOR = "resolution_syntax_validator"
 
 class Error(BaseModel):
     execution_step: ExecutionStep = Field(description="The step in which the error occurred")

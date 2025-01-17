@@ -1,15 +1,17 @@
 from enum import Enum
 
 from langchain_core.messages import AIMessage
-from langchain_core.prompts import PipelinePromptTemplate, PromptTemplate
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from typing import List, Dict
 
+from models.errors import Error
 from models.llm_output import ToponymSearchArguments, ValidatedOutput
 
 
 # enum of the possible phases of the reflective candidate generation
 class ReflectionPhase(str, Enum):
+    CRITIC_GENERATION_FOR_INVALID_RESOLUTIONS = "critic_generation_for_invalid_resolutions"
+    CRITIC_GENERATION_FOR_RESOLUTION_FATAL_ERRORS = "critic_generation_for_resolution_fatal_errors"
     INITIAL_ACTOR_GENERATION = "initial_actor_generation"
     CRITIC_GENERATION_FOR_FATAL_ERRORS = "critic_generation_for_fatal_errors"
     CRITIC_GENERATION_FOR_INVALID_TOPONYMS = "critic_generation_for_invalid_toponyms"
@@ -50,3 +52,28 @@ class CandidateGenerationState(CandidateGenerationOutput):
     reflected_prompt: str = Field(
         description="The prompt containing actionable feedback by the critic",
         default=None)
+
+
+class ResolvedToponym(BaseModel):
+    toponym: str = Field(description="The toponym to resolve")
+    reasoning: str = Field(description="The reasoning for the selection of a candidate")
+    selected_candidate_geonameId: int = Field(description="The GeoNames ID of the selected candidate")
+
+
+class ResolvedToponymWithErrors(ResolvedToponym):
+    errors: List[Error] = Field(description="List of errors in the resolution of the toponym")
+
+
+class GeoCodingState(CandidateGenerationState):
+    resolution_initial_prompt: str = Field(description="The prompt used to generate the resolution output",
+                                           default=None)
+    resolution_raw_output: AIMessage = Field(description="The raw output of the resolution model",
+                                             default=None)
+    geocoded_toponyms: List[ResolvedToponym] = Field(description="List of resolved toponyms",
+                                                     default=[])
+    valid_geocoded_toponyms: List[ResolvedToponym] = Field(description="List of valid resolved toponyms",
+                                                           default=[])
+    invalid_geocoded_toponyms: List[ResolvedToponymWithErrors] = Field(description="List of invalid resolved toponyms",
+                                                                       default=[])
+    resolution_fatal_errors: List[Error] = Field(description="List of fatal errors in the resolution output",
+                                                 default=[])

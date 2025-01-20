@@ -6,8 +6,10 @@ from agent_components.llms.chatAI import ChatAIHandler
 
 
 class WorkingMemory:
-    def __init__(self):
-        self.few_shot_handler = EpisodicMemory(data_directory='data/', xml_file='LGL_test.xml')
+    def __init__(self, skip_few_shot_loader: bool = False):
+        self.few_shot_handler = EpisodicMemory(data_directory='data/',
+                                               xml_file='LGL_test.xml',
+                                               skip_few_shot_loader=skip_few_shot_loader)
         self.long_term_memory = LongTermMemory(documentation_file="agent_components/memory/external_tool_documentation/geonames_websearch_documentation.md")
 
     def create_final_prompt(self) -> PipelinePromptTemplate:

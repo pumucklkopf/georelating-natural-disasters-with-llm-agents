@@ -1,11 +1,15 @@
+import json
 import random
+from typing import Tuple, List
 
 from langchain_community.document_loaders import TextLoader
 from langchain_core.prompts import PromptTemplate
 
 from agent_components.llms.chatAI import ChatAIHandler
-from models.candidates import CandidateGenerationState, GeoCodingState, ReflectionPhase
+from models.candidates import CandidateGenerationState, GeoCodingState, ReflectionPhase, ToponymWithCandidatesShort, \
+    CandidateResolutionInput, ToponymWithCandidates
 from models.errors import Error
+from helpers.helpers import preprocess_data
 
 string_seperator = "\n\n----------------------------------------\n"
 
@@ -17,6 +21,16 @@ class LongTermMemory:
         self.system_instructions_prompt = self._create_system_instructions()
         self.task_instructions_prompt = self._create_task_instructions()
         self.documentation_prompt = self.create_documentation_message()
+        self.reflective_actor_system_prompt = (
+            "System: \n"
+            "You are a reflective actor. Please strictly follow the feedback provided by the critic to generate a "
+            "new output which does not lead to the errors your previous generation caused."
+        )
+        self.reflective_actor_instruction_prompt_text = "Your new output in plain JSON:\n"
+
+    ####################################################################################################################
+    # Baseline Candidate Generation
+    ####################################################################################################################
 
     def _load_documentation(self):
         loader = TextLoader(self.documentation_file, encoding='utf-8')
@@ -64,6 +78,10 @@ class LongTermMemory:
             f"Here is the documentation for the GeoNames Websearch API provided in Markdown:\n"
             f"{self.documentation[0].page_content}"
         )
+
+    ####################################################################################################################
+    # Reflective (Critic) Candidate Generation
+    ####################################################################################################################
 
     def _generate_initial_generation_prompt_text(self, state: CandidateGenerationState | GeoCodingState) -> str:
         generated_output = str(state.raw_output.content)
@@ -148,14 +166,8 @@ class LongTermMemory:
         return prompt.format()
 
     def generate_reflected_actor_prompt(self, state: CandidateGenerationState | GeoCodingState) -> str:
-        reflective_actor_system_prompt = (
-            "System: \n"
-            "You are a reflective actor. Please strictly follow the feedback provided by the critic to generate a "
-            "new output which does not lead to the errors your previous generation caused."
-        )
         initial_generation_prompt_text = self._generate_initial_generation_prompt_text(state)
         feedback = f"Actionable feedback by the critic: \n{str(state.critic_feedback.content)}"
-        reflective_actor_instruction_prompt_text = "Your new output in plain JSON:\n"
 
         invalid_prompt_part = ""
 
@@ -166,11 +178,11 @@ class LongTermMemory:
                                    "Now generate the search arguments ONLY for all invalid toponyms, NOT for the "
                                    "valid or duplicate ones. \n")
 
-        reflected_prompt_text = (reflective_actor_system_prompt + string_seperator +
+        reflected_prompt_text = (self.reflective_actor_system_prompt + string_seperator +
                                  initial_generation_prompt_text + string_seperator +
                                  feedback + string_seperator +
                                  invalid_prompt_part +
-                                 reflective_actor_instruction_prompt_text)
+                                 self.reflective_actor_instruction_prompt_text)
         prompt = PromptTemplate(
             template=reflected_prompt_text,
             template_format="mustache",
@@ -178,14 +190,100 @@ class LongTermMemory:
         )
         return prompt.format()
 
+    ####################################################################################################################
+    # Reflective (Critic) Candidate Resolution
+    ####################################################################################################################
     @staticmethod
-    def _generate_initial_generation_prompt_for_resolution(state: GeoCodingState) -> str:
+    def _generate_basic_instructions() -> Tuple[str, str]:
+        instructions = ("System: \n"
+                        "You are an expert with comprehensive geographical knowledge. Your task is to select the "
+                        "correct candidate for each toponym listed under the 'Toponyms with candidates' key. Follow "
+                        "these instructions:\n"
+                        "1. **Candidate Selection**:\n"
+                        " - Use your understanding of geography and the context of the news article to determine the "
+                        "most likely candidate for each toponym.\n"
+                        " - If no candidates match the toponym, select `null` and provide a detailed explanation.\n"
+                        "2. **Reasoning**:\n"
+                        " - Base your decision on the context of the news article, prioritizing geographical and "
+                        "situational clues.\n"
+                        " - Be concise yet precise in your reasoning, focusing on relevant parameters like name, "
+                        "location, and type.\n"
+                        "3. **Output**:\n"
+                        " - Provide the result in JSON format following the example given below, ensuring consistency "
+                        "in keys and structure.\n"
+                        "4. **Error Handling**:\n"
+                        " - If the context is ambiguous or insufficient, state this explicitly in your reasoning.")
+        # load example from json file
+        with open("data/few_shot_examples_selection_short.json", "r") as f:
+            example = json.load(f)
+        example_text = (f"Example: \n"
+                        f"Title: {example['title']}\n"
+                        f"News Article: {example['news_article']}\n"
+                        f"Toponyms with candidates: \n{json.dumps(example['toponyms_with_candidates'],
+                                                                  indent=4)}\n"
+                        f"Output in JSON: \n{json.dumps(example['ground_truth'],
+                                                        indent=4)}\n")
+        return instructions, example_text
+
+    @staticmethod
+    def _generate_input_candidates(article_title: str,
+                                   article_text: str,
+                                   toponyms_with_candidates_list: List[ToponymWithCandidates]) -> str:
+        # Required fields for candidates
+        CANDIDATE_FIELDS = ["adminName1", "countryName", "fclName", "fcodeName",
+                            "geonameId", "lat", "lng", "name", "population", "toponymName"]
+
+        # Processing with a generator for efficiency and clarity
+        reduced_toponyms_with_candidates_list = [
+            ToponymWithCandidatesShort(
+                toponym=topo.toponym_with_search_arguments.toponym,
+                candidates=[
+                    {field: candidate[field] for field in CANDIDATE_FIELDS if field in candidate}
+                    for candidate in topo.candidates
+                ]
+            )
+            for topo in toponyms_with_candidates_list if not topo.toponym_with_search_arguments.duplicate_of
+        ]
+        toponyms_with_candidates = CandidateResolutionInput(toponyms_with_candidates=reduced_toponyms_with_candidates_list)
+        input_text = (f"Ensure your response is structured and clear. Now, it's your turn. Respond only in JSON::\n"
+                      f"Title: {article_title}\n"
+                      f"News Article: {article_text}\n"
+                      f"Toponyms with candidates: \n[{toponyms_with_candidates.model_dump_json(indent=4)}]\n"
+                      f"Output in JSON: \n")
+        return input_text
+
+    def generate_candidate_resolution_prompt(self, state: GeoCodingState) -> str:
+        """
+        Resolve the candidates retrieved from the GeoNames API to one correct toponym.
+        :param state: The current state of the reflective candidate generation.
+        :return: The updated state of the reflective candidate generation.
+        """
+        if isinstance(state, CandidateGenerationState):
+            raw_state = state.model_dump()
+            # Preprocess the data to replace None values with model defaults
+            preprocessed_state = preprocess_data(raw_state, GeoCodingState)
+            # Parse the preprocessed data into the Pydantic model
+            state = GeoCodingState(**preprocessed_state)
+
+        instructions, example_text = self._generate_basic_instructions()
+        input_text = self._generate_input_candidates(state.article_title,
+                                                     state.article_text,
+                                                     state.toponyms_with_candidates)
+
+        prompt = PromptTemplate(
+            template=instructions + string_seperator + example_text + string_seperator + input_text,
+            template_format="mustache",
+            input_variables=[]
+        )
+        return prompt.format()
+
+    def _generate_initial_generation_prompt_for_resolution(self, state: GeoCodingState) -> str:
         # Generate the initial generation prompt text
+        instructions, example_text = self._generate_basic_instructions()
         generated_output = str(state.resolution_raw_output.content)
-        initial_generation_prompt = state.resolution_initial_prompt
 
         initial_generation_prompt = (
-            f"Original Prompt Text: \n {initial_generation_prompt + string_seperator}"
+            f"Original Prompt Text: \n {instructions + example_text + string_seperator}"
             f"Generated Output: \n {generated_output}"
         )
         return initial_generation_prompt
@@ -210,17 +308,20 @@ class LongTermMemory:
         critic_system_prompt = (
             "System: \n"
             "You are a constructive critic for the actor LLM which generated the output below. Please analyze the "
-            "invalid output and their corresponding errors in the generated output. Provide actionable feedback "
+            "invalid toponyms and their corresponding errors in the generated output. Provide actionable feedback "
             "to fix these errors. Make sure your feedback adheres closely to the instructions in the original "
             "prompt. Your feedback will be directly used to guide the actor LLM to generate better outputs in the "
-            "future. Focus only on the invalid outputs based on the error message for each of them."
+            "future. Focus ONLY on the invalid outputs strictly based on the error message for each of them."
             " Be as concise as possible and ensure to include every invalid output provided below."
             # Actionable feedback, c.g. Madaan et al. (2023) and Lauscher et al. (2024)
         )
         initial_generation_prompt = self._generate_initial_generation_prompt_for_resolution(state)
 
-        invalid_outputs = [f"{topo.model_dump_json(indent=4)},\n" for topo in state.invalid_geocoded_toponyms]
-        invalid_outputs_text = f"All incorrect toponyms with errors: \n [{invalid_outputs}]"
+        invalid_outputs = [f"{topo.model_dump_json(indent=4)},\n" for topo in state.invalid_geocoded_toponyms
+                           if not "Resolved toponym does not reference a toponym in the article" in topo.errors[
+                -1].error_message]
+        invalid_outputs = "".join(invalid_outputs)
+        invalid_outputs_text = f"All invalid toponyms with errors: \n {invalid_outputs}"
 
         critic_instruction = "Your feedback:\n"
 
@@ -231,6 +332,45 @@ class LongTermMemory:
 
         prompt = PromptTemplate(
             template=critic_prompt_text,
+            template_format="mustache",
+            input_variables=[]
+        )
+        return prompt.format()
+
+    def generate_resolution_reflected_actor_prompt(self, state: GeoCodingState) -> str:
+        """
+        Generate the prompt for the reflective actor in the resolution phase.
+        :param state: The current state of the reflective candidate resolution.
+        :return: The formatted prompt for the reflective actor.
+        """
+        initial_generation_prompt_text = self._generate_initial_generation_prompt_for_resolution(state)
+        feedback = f"Actionable feedback by the critic: \n{str(state.resolution_critic_feedback.content)}"
+
+        invalid_prompt_part = ""
+
+        if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_RETRY_ON_INVALID_RESOLUTIONS:
+            invalids = [topo.toponym for topo in state.invalid_geocoded_toponyms
+                        if not "Resolved toponym does not reference a toponym in the article" in
+                               topo.errors[-1].error_message]
+            missing_topos_with_candidates = [topo for topo in state.toponyms_with_candidates if
+                                             topo.toponym_with_search_arguments.toponym in invalids]
+            input_text = self._generate_input_candidates(state.article_title,
+                                                         state.article_text,
+                                                         missing_topos_with_candidates)
+
+            invalids = ", ".join(invalids)
+            invalid_prompt_part = (f"**Retry for article:** \n"
+                                   f"{input_text + string_seperator}"
+                                   f"Short List of all missing toponyms: [{invalids}]{string_seperator}"
+                                   "Now generate the search arguments ONLY for all missing toponyms, NOT for the "
+                                   "valid ones. \n")
+
+        reflected_prompt_text = (self.reflective_actor_system_prompt + string_seperator +
+                                 initial_generation_prompt_text + string_seperator +
+                                 feedback + string_seperator +
+                                 invalid_prompt_part)
+        prompt = PromptTemplate(
+            template=reflected_prompt_text,
             template_format="mustache",
             input_variables=[]
         )

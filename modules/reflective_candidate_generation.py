@@ -1,17 +1,13 @@
-import json
 import pickle
 import os
 import time
-from typing import List, Dict
 
 import pandas as pd
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
-from langchain_core.prompts import PromptTemplate
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 from openai import APIStatusError
-from pydantic import BaseModel, Field
 from tqdm import tqdm
 
 from agent_components.environment.external_tools import GeoNamesAPI
@@ -19,20 +15,21 @@ from agent_components.environment.internal_tools import ArticleSyntaxValidator, 
 from agent_components.llms.api_error_handler import handle_api_errors
 from agent_components.llms.chatAI import ChatAIHandler
 from agent_components.memory.working_memory import WorkingMemory
+from evaluation.candidate_generation_evaluation import CandidateGenerationEvaluator
+from helpers.helpers import preprocess_data
 from models.candidates import CandidateGenerationState, CandidateGenerationOutput, ReflectionPhase, GeoCodingState
 from models.errors import Error, ExecutionStep
 from models.llm_output import LLMOutput, ValidatedOutput
-
-string_seperator = "\n\n----------------------------------------\n"
 
 
 class ReflectiveCandidateGenerator:
     def __init__(self,
                  actor_model_name: str = "meta-llama-3.1-8b-instruct",
                  critic_model_name: str = "meta-llama-3.1-8b-instruct",
-                 call_times: list = None):
+                 call_times: list = None,
+                 skip_few_shot_loader: bool = False):
         load_dotenv()
-        self.working_memory = WorkingMemory()
+        self.working_memory = WorkingMemory(skip_few_shot_loader=skip_few_shot_loader)
         self.data_handler = self.working_memory.few_shot_handler.data_handler
         self.llm_handler = ChatAIHandler()
         self.llm = self.llm_handler.get_model(actor_model_name)
@@ -46,6 +43,10 @@ class ReflectiveCandidateGenerator:
     """
     Node functions
     """
+
+    ####################################################################################################################
+    # Candidate Generation
+    ####################################################################################################################
 
     def create_prompt(self, input_state: CandidateGenerationState) -> CandidateGenerationState:
         toponyms = self.data_handler.get_short_toponyms_for_article(input_state.article_id)
@@ -171,13 +172,10 @@ class ReflectiveCandidateGenerator:
             ))
             return state
 
-    def add_critique_error(self, state: CandidateGenerationState) -> CandidateGenerationState:
-        if state.fatal_errors:
-            state.fatal_errors.append(Error(
-                execution_step=ExecutionStep.CRITIC,
-                error_message="Critique did not solve fatal errors. Exiting."
-            ))
-        return state
+
+    ####################################################################################################################
+    # Candidate Resolution
+    ####################################################################################################################
 
     def create_candidate_resolution_prompt(self, state: GeoCodingState) -> GeoCodingState:
         """
@@ -185,63 +183,9 @@ class ReflectiveCandidateGenerator:
         :param state: The current state of the reflective candidate generation.
         :return: The updated state of the reflective candidate generation.
         """
-
-        # Get the list of toponyms with candidates
-        class ToponymWithCandidatesShort(BaseModel):
-            toponym: str = Field(description="The toponym for which the candidates were retrieved")
-            candidates: List[Dict] = Field(description="List of candidates retrieved from the GeoNames API")
-
-        class CandidateResolutionInput(BaseModel):
-            toponyms_with_candidates: List[ToponymWithCandidatesShort] = Field(
-                description="List of toponyms with candidates",
-                default=[]
-            )
-
-        # Required fields for candidates
-        CANDIDATE_FIELDS = ["adminName1", "countryName", "fclName", "fcodeName",
-                            "geonameId", "lat", "lng", "name", "population", "toponymName"]
-
-        # Processing with a generator for efficiency and clarity
-        toponyms_with_candidates_list = [
-            ToponymWithCandidatesShort(
-                toponym=topo.toponym_with_search_arguments.toponym,
-                candidates=[
-                    {field: candidate[field] for field in CANDIDATE_FIELDS if field in candidate}
-                    for candidate in topo.candidates
-                ]
-            )
-            for topo in state.toponyms_with_candidates
-        ]
-        toponyms_with_candidates = CandidateResolutionInput(toponyms_with_candidates=toponyms_with_candidates_list)
-        instructions = (f"System: \n"
-                        f"You are an expert with comprehensive geographical knowledge. Your task is to select the "
-                        f"right candidate out of the options provided to you for every single toponym. You should "
-                        f"use your geographic understanding to reason why a certain candidate is the correct one for "
-                        f"the given toponym, provided the context of the news article. Be as precise as possible and "
-                        f"ensure to select the most relevant candidate for each toponym.\n"
-                        f"If you are very sure that none of the candidates fits the toponym, you can also select "
-                        f"null as the selected candidate and provide your reason in detail.\n")
-        # load example from json file
-        with open("data/few_shot_examples_selection_short.json", "r") as f:
-            example = json.load(f)
-        example_text = (f"Example: \n"
-                        f"Title: {example['title']}\n"
-                        f"News Article: {example['news_article']}\n"
-                        f"Toponyms with candidates: \n{json.dumps(example['toponyms_with_candidates'],
-                                                                  indent=4)}\n"
-                        f"Output: \n{json.dumps(example['ground_truth'],
-                                                indent=4)}\n")
-        input_text = (f"Now it's your turn. Respond only in JSON:\n"
-                      f"Title: {state.article_title}\n"
-                      f"News Article: {state.article_text}\n"
-                      f"Toponyms with candidates: \n{toponyms_with_candidates.model_dump_json(indent=4)}\n"
-                      f"Output: \n")
-        prompt = PromptTemplate(
-            template=instructions + string_seperator + example_text + string_seperator + input_text,
-            template_format="mustache",
-            input_variables=[]
-        )
-        state.resolution_initial_prompt = prompt.format()
+        prompt_builder = self.working_memory.long_term_memory
+        state.resolution_initial_prompt = prompt_builder.generate_candidate_resolution_prompt(state)
+        state.reflection_phase = ReflectionPhase.RESOLUTION_ACTOR_GENERATION
         return state
 
     def call_resolution_actor(self, state: GeoCodingState) -> GeoCodingState:
@@ -255,8 +199,13 @@ class ReflectiveCandidateGenerator:
         def _invoke_resolution_actor(input_prompt: str):
             return self.llm.invoke(input_prompt)
 
+        if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_GENERATION:
+            prompt = state.resolution_initial_prompt
+        else:
+            prompt = state.resolution_reflected_prompt
+
         try:
-            resolution_output = _invoke_resolution_actor(state.resolution_initial_prompt)
+            resolution_output = _invoke_resolution_actor(prompt)
             if isinstance(resolution_output, APIStatusError):
                 state.resolution_fatal_errors.append(Error(
                     execution_step=ExecutionStep.RESOLUTION_ACTOR,
@@ -296,18 +245,55 @@ class ReflectiveCandidateGenerator:
         prompt_builder = self.working_memory.long_term_memory
         #todo below
         if state.resolution_fatal_errors:
-            state.reflection_phase = ReflectionPhase.CRITIC_GENERATION_FOR_RESOLUTION_FATAL_ERRORS
-            state.critic_prompt = prompt_builder.generate_resolution_critic_prompt_for_fatal_errors(state)
+            state.reflection_phase = ReflectionPhase.RESOLUTION_CRITIC_GENERATION_FOR_FATAL_ERRORS
+            state.resolution_critic_prompt = prompt_builder.generate_resolution_critic_prompt_for_fatal_errors(state)
         else:
-            state.reflection_phase = ReflectionPhase.CRITIC_GENERATION_FOR_INVALID_RESOLUTIONS
-            state.critic_prompt = prompt_builder.generate_resolution_critic_prompt_for_invalid_toponyms(state)
+            state.reflection_phase = ReflectionPhase.RESOLUTION_CRITIC_GENERATION_FOR_INVALID_RESOLUTIONS
+            state.resolution_critic_prompt = prompt_builder.generate_resolution_critic_prompt_for_invalid_toponyms(state)
+
+        @handle_api_errors(call_times=self.call_times)
+        def _invoke_llm(input_prompt: str):
+            return self.critic_llm.invoke(input_prompt)
+
+        try:
+            critic_feedback = _invoke_llm(state.resolution_critic_prompt)
+            if not isinstance(critic_feedback, APIStatusError):
+                state.resolution_critic_feedback = AIMessage(**critic_feedback.model_dump())
+            else:
+                state.resolution_fatal_errors.append(Error(
+                    execution_step=ExecutionStep.CRITIC,
+                    error_message=critic_feedback.message
+                ))
+                return state
+
+            # generate the matching reflected actor prompt
+            if state.reflection_phase == ReflectionPhase.RESOLUTION_CRITIC_GENERATION_FOR_FATAL_ERRORS:
+                state.reflection_phase = ReflectionPhase.RESOLUTION_ACTOR_RETRY_AFTER_FATAL_ERROR
+            else:
+                state.reflection_phase = ReflectionPhase.RESOLUTION_ACTOR_RETRY_ON_INVALID_RESOLUTIONS
+            state.resolution_reflected_prompt = prompt_builder.generate_resolution_reflected_actor_prompt(state)
+
+            # Reset fatal errors for the next iteration of the reflective candidate generation
+            state.resolution_fatal_errors = []
+            return state
+        except Exception as e:
+            state.resolution_fatal_errors.append(Error(
+                execution_step=ExecutionStep.RESOLUTIONCRITIC,
+                error_message=str(e)
+            ))
+            return state
 
 
     """
     Routing functions
     """
 
-    def has_fatal_errors(self, state: CandidateGenerationState) -> str:
+    ####################################################################################################################
+    # Candidate Generation
+    ####################################################################################################################
+
+    @staticmethod
+    def has_fatal_errors( state: CandidateGenerationState) -> str:
         if state.fatal_errors:
             if state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR or \
                     state.reflection_phase == ReflectionPhase.ACTOR_RETRY_ON_INVALID_TOPONYMS:
@@ -317,7 +303,8 @@ class ReflectiveCandidateGenerator:
         else:
             return "successful"
 
-    def has_invalid_toponyms(self, state: CandidateGenerationState) -> str:
+    @staticmethod
+    def has_invalid_toponyms(state: CandidateGenerationState) -> str:
         if state.fatal_errors:
             if state.reflection_phase == ReflectionPhase.ACTOR_RETRY_AFTER_FATAL_ERROR:
                 return "critique_did_not_solve_fatal_errors_or_invalid_toponyms"
@@ -332,11 +319,70 @@ class ReflectiveCandidateGenerator:
             else:
                 return "everything_valid"
 
-    def critique_was_generated(self, state: CandidateGenerationState) -> str:
+    @staticmethod
+    def critique_was_generated(state: CandidateGenerationState) -> str:
         if state.fatal_errors:
             return "critique_failed"
         else:
             return "critique_generated"
+
+    # Necessary to include as a node function to be able to change the state of the graph
+    @staticmethod
+    def add_critique_error(
+            state: CandidateGenerationState | GeoCodingState) -> CandidateGenerationState | GeoCodingState:
+        if isinstance(state, GeoCodingState):
+            if state.resolution_fatal_errors:
+                state.resolution_fatal_errors.append(Error(
+                    execution_step=ExecutionStep.RESOLUTIONCRITIC,
+                    error_message="Resolution critique did not solve fatal errors. Exiting."
+                ))
+                return state
+
+        if state.fatal_errors:
+            state.fatal_errors.append(Error(
+                execution_step=ExecutionStep.CRITIC,
+                error_message="Critique did not solve fatal errors. Exiting."
+            ))
+        return state
+
+    ####################################################################################################################
+    # Candidate Resolution
+    ####################################################################################################################
+
+    @staticmethod
+    def has_fatal_errors_resolution(state: GeoCodingState) -> str:
+        if state.resolution_fatal_errors:
+            if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_RETRY_AFTER_FATAL_ERROR or \
+                    state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_RETRY_ON_INVALID_RESOLUTIONS:
+                return "critique_did_not_solve_fatal_errors"
+            else:
+                return "has_fatal_errors"
+        else:
+            return "successful"
+
+    @staticmethod
+    def has_invalid_resolutions(state: GeoCodingState) -> str:
+        if state.resolution_fatal_errors:
+            if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_RETRY_AFTER_FATAL_ERROR:
+                return "critique_did_not_solve_fatal_errors_or_invalid_resolutions"
+            else:
+                return "has_fatal_errors_or_invalid_resolutions"
+        else:
+            if state.invalid_geocoded_toponyms:
+                if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_RETRY_ON_INVALID_RESOLUTIONS:
+                    return "critique_did_not_solve_fatal_errors_or_invalid_resolutions"
+                else:
+                    return "has_fatal_errors_or_invalid_resolutions"
+            else:
+                return "everything_valid"
+
+    @staticmethod
+    def critique_was_generated_resolution(state: GeoCodingState) -> str:
+        if state.resolution_fatal_errors:
+            return "critique_failed"
+        else:
+            return "critique_generated"
+
 
     """
     Grap Structure
@@ -353,6 +399,7 @@ class ReflectiveCandidateGenerator:
         graph_builder.add_node("retrieve_candidates", self.retrieve_candidates)
         graph_builder.add_node("criticize", self.criticize)
         graph_builder.add_node("add_critique_error", self.add_critique_error)
+
 
         # Set the entry point and define edges
         graph_builder.set_entry_point("create_prompt")
@@ -394,11 +441,55 @@ class ReflectiveCandidateGenerator:
         graph_builder.add_edge("add_critique_error", END)
         return graph_builder
 
+    def build_resolution_graph(self):
+        graph_builder = StateGraph(GeoCodingState)
+
+        # Add nodes to the graph
+        graph_builder.add_node("create_candidate_resolution_prompt", self.create_candidate_resolution_prompt)
+        graph_builder.add_node("call_resolution_actor", self.call_resolution_actor)
+        graph_builder.add_node("extract_resolution_output", self.extract_resolution_output)
+        graph_builder.add_node("validate_resolution_output", self.validate_resolution_output)
+        graph_builder.add_node("criticize_resolution", self.criticize_resolution)
+        graph_builder.add_node("add_critique_error", self.add_critique_error)
+
+        # Set the entry point and define edges
+        graph_builder.set_entry_point("create_candidate_resolution_prompt")
+        graph_builder.add_edge("create_candidate_resolution_prompt", "call_resolution_actor")
+        graph_builder.add_conditional_edges("call_resolution_actor",
+                                            self.has_fatal_errors_resolution,
+                                            {
+                                                "has_fatal_errors": "criticize_resolution",
+                                                "successful": "extract_resolution_output",
+                                                "critique_did_not_solve_fatal_errors": "add_critique_error"
+                                            })
+        graph_builder.add_conditional_edges("extract_resolution_output",
+                                            self.has_fatal_errors_resolution,
+                                            {
+                                                "has_fatal_errors": "criticize_resolution",
+                                                "successful": "validate_resolution_output",
+                                                "critique_did_not_solve_fatal_errors": "add_critique_error"
+                                            })
+        graph_builder.add_conditional_edges("validate_resolution_output",
+                                            self.has_invalid_resolutions,
+                                            {
+                                                "has_fatal_errors_or_invalid_resolutions": "criticize_resolution",
+                                                "everything_valid": END,
+                                                "critique_did_not_solve_fatal_errors_or_invalid_resolutions": "add_critique_error"
+                                            })
+        graph_builder.add_conditional_edges("criticize_resolution",
+                                            self.critique_was_generated_resolution,
+                                            {
+                                                "critique_generated": "call_resolution_actor",
+                                                "critique_failed": "add_critique_error"
+                                            })
+        graph_builder.add_edge("add_critique_error", END)
+        return graph_builder
+
     """
     Compile and run the graph
     """
 
-    def run_graph(self, article: pd.Series):
+    def run_generation_graph(self, article: pd.Series):
         graph_builder = self.build_graph()
         agent_graph = graph_builder.compile()
 
@@ -428,64 +519,90 @@ class ReflectiveCandidateGenerator:
             if os.path.exists(os.path.join(output_dir, f'{article_id}.pkl')):
                 continue
 
-            agent_graph_answer = self.run_graph(article)
+            agent_graph_answer = self.run_generation_graph(article)
 
             # Parse dictionary (default langgraph output) to CandidateGenerationState
             agent_graph_answer = CandidateGenerationState(**agent_graph_answer)
 
             with open(os.path.join(output_dir, f'{article_id}.pkl'), 'wb') as f:
+                # noinspection PyTypeChecker
                 pickle.dump(agent_graph_answer, f)
 
-    def generate_graph_image(self, output_file_path: str = "new_new_graph_layout_image.png"):
-        graph_builder = self.build_graph()
+    def generate_graph_image(self, output_file_path: str = "graph_layout_image.png", candidate_resolution: bool = False):
+        if candidate_resolution:
+            graph_builder = self.build_resolution_graph()
+        else:
+            graph_builder = self.build_graph()
         agent_graph = graph_builder.compile()
         image_data = agent_graph.get_graph().draw_mermaid_png(output_file_path=output_file_path)
         # Open the image
         os.system(output_file_path)
         return image_data
 
+    def run_resolution_graph(self,
+                             input_directory: str = "",
+                             output_directory: str = ""):
+        if not os.path.exists(input_directory):
+            raise FileNotFoundError(f"Input directory {input_directory} does not exist.")
+        evaluator = CandidateGenerationEvaluator(output_directory=input_directory,
+                                                 data_directory='data/')
+        os.makedirs(output_directory, exist_ok=True)
+        for candidate_file in tqdm(os.listdir(input_directory), desc="Processing candidate files"):
+            if not candidate_file.endswith(".pkl"):
+                continue
+            article_id = candidate_file.replace(".pkl", "")
+            candidate_generation = evaluator.load_generation_for_article(article_id)
+            candidate_generation_dict = preprocess_data(candidate_generation.model_dump(), GeoCodingState)
+            graph_builder = self.build_resolution_graph()
+            agent_graph = graph_builder.compile()
+            agent_graph_answer = agent_graph.invoke(candidate_generation_dict)
+            # Parse dictionary (default langgraph output) to GeoCodingState
+            agent_graph_answer = GeoCodingState(**agent_graph_answer)
+            with open(os.path.join(output_directory, f'{article_id}.pkl'), 'wb') as f:
+                # noinspection PyTypeChecker
+                pickle.dump(agent_graph_answer, f)
+
 
 if __name__ == "__main__":
 
     call_times = []
-    actor_critic_combo = [("mistral-large-instruct", "llama-3.3-70b-instruct")]
-    for actor, critic in actor_critic_combo:
-        seed = 24
-        nof_articles = 1000
 
+    seed = 24
+    nof_articles = 1000
+    actor = "llama-3.3-70b-instruct"  # ["meta-llama-3.1-8b-instruct", "llama-3.3-70b-instruct", "mistral-large-instruct"]
+    critic = "mistral-large-instruct"
+    output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+    # input dir for resolution graph
+    input_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250115_seed_24_1000_articles'
+
+    """
+    Run reflective candidate resolution graph
+    """
+    for actor, critic in [("llama-3.3-70b-instruct", "mistral-large-instruct"),
+                          ("meta-llama-3.1-8b-instruct", "meta-llama-3.1-8b-instruct"),
+                          ("meta-llama-3.1-8b-instruct", "mistral-large-instruct"),]:
+        output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
         generator = ReflectiveCandidateGenerator(
             actor_model_name=actor,
             critic_model_name=critic,
-            call_times=call_times
+            call_times=call_times,
+            skip_few_shot_loader=True
         )
-        output_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
-
         start = time.time()
-        generator.reflectively_generate_candidates_for_evaluation(
-            seed=seed,
-            nof_articles=nof_articles,
-            output_dir=output_dir
+        generator.run_resolution_graph(input_directory=input_dir, output_directory=output_dir)
+        with open(f"{output_dir}/stats.txt", "a") as f:
+            f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")
 
-        )
-        call_times.extend(generator.call_times)
-        print(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.")
-        try:
-            with open(f"{output_dir}/stats.txt", "a") as f:
-                f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")
-        except Exception as e:
-            continue
-    # generator = ReflectiveCandidateGenerator(
-    #     actor_model_name=actor,
-    #     critic_model_name=critic,
-    #     call_times=call_times
-    # )
 
-    # # generator.generate_graph_image()
-    # seed = 24
-    # nof_articles = 1000
-    # actor = "meta-llama-3.1-8b-instruct"  # ["meta-llama-3.1-8b-instruct", "llama-3.3-70b-instruct", "mistral-large-instruct"]
-    # critic = "mistral-large-instruct"
-    # output_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+    """
+    Generate graph layout picture  
+    """
+    # generator.generate_graph_image(output_file_path="output/reflective_candidate_resolution_graph.png",
+    #                                candidate_resolution=True)
+
+    """
+    Reflective Candidate Generation
+    """
     # start = time.time()
     # generator.reflectively_generate_candidates_for_evaluation(
     #     seed=seed,

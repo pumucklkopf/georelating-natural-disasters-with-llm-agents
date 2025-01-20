@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from openai import APITimeoutError, AuthenticationError, BadRequestError, ConflictError, \
     InternalServerError, NotFoundError, PermissionDeniedError, RateLimitError, UnprocessableEntityError
 import time
@@ -40,23 +42,32 @@ def handle_api_errors(call_times):
 
                 except RateLimitError as e:
                     now = time.time()
-                    # Remove timestamps older than 24 hours
-                    while call_times and now - call_times[0] > 86400:
-                        call_times.pop(0)
 
-                    if len(call_times) > DAILY_RATE_LIMIT:
+                    # Determine time boundaries
+                    one_hour_ago = now - 3600
+                    start_of_today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+                    # Filter timestamps to:
+                    # 1. Keep timestamps younger than one hour (regardless of date)
+                    # 2. Keep timestamps older than one hour if they are from today
+                    relevant_call_times = [
+                        ts for ts in call_times
+                        if ts >= one_hour_ago or (start_of_today <= ts < now)
+                    ]
+
+                    if len(relevant_call_times) > DAILY_RATE_LIMIT:
                         # sleep until 12am EST
                         time_to_sleep = 86400 - (now % 86400)
                         print(
                             f"\nDaily rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)
-                    elif len(call_times) > HOURLY_RATE_LIMIT and now - call_times[-HOURLY_RATE_LIMIT] < 3600:
-                        time_to_sleep = call_times[-HOURLY_RATE_LIMIT] + 3600 - now
+                    elif len(relevant_call_times) > HOURLY_RATE_LIMIT and now - relevant_call_times[-HOURLY_RATE_LIMIT] < 3600:
+                        time_to_sleep = relevant_call_times[-HOURLY_RATE_LIMIT] + 3600 - now
                         print(
                             f"\nHourly rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)
-                    elif len(call_times) > DAILY_RATE_LIMIT and now - call_times[-MINUTE_RATE_LIMIT] < 60:
-                        time_to_sleep = call_times[-MINUTE_RATE_LIMIT] + 60 - now
+                    elif len(relevant_call_times) > DAILY_RATE_LIMIT and now - relevant_call_times[-MINUTE_RATE_LIMIT] < 60:
+                        time_to_sleep = relevant_call_times[-MINUTE_RATE_LIMIT] + 60 - now
                         print(
                             f"\nMinute rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)

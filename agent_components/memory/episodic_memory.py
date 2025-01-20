@@ -12,11 +12,14 @@ from data_handler.xml_parsing import XMLDataHandler
 class EpisodicMemory:
     FEW_SHOT_EXAMPLE_PATH = 'data/few_shot_examples_generation.json'
 
-    def __init__(self, data_directory: str, xml_file: str):
+    def __init__(self, data_directory: str, xml_file: str, skip_few_shot_loader: bool = False):
         self.data_handler = XMLDataHandler(data_directory)
         self.data_handler.parse_xml(xml_file)
         self.examples = self._load_examples()
-        self.few_shot_template = self.create_few_shot_template()
+        if skip_few_shot_loader:
+            self.few_shot_template = None
+        else:
+            self.few_shot_template = self.create_few_shot_template()
 
     def _load_ground_truth(self, few_shot_example_path: str = FEW_SHOT_EXAMPLE_PATH) -> List[Document]:
 

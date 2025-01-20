@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 import itertools
@@ -124,11 +125,24 @@ class OutputParser:
 
     @handle_exceptions(ExecutionStep.SEARCHOUTPUTPARSER)
     def extract_resolution_output(self, state: GeoCodingState):
+        state.geocoded_toponyms = []
         resolved_toponyms = [
             ResolvedToponym.model_validate(location_mention)
             for location_mention in self.clean_and_parse_json_content(state.resolution_raw_output.content)
         ]
         state.geocoded_toponyms.extend(resolved_toponyms)
+
+        # Since only non-duplicates are provided to the actor LLM, we need to add the duplicates to the list of
+        # resolved toponyms manually afterward  in the initial try of the resolution actor
+        if state.reflection_phase == ReflectionPhase.RESOLUTION_ACTOR_GENERATION:
+            for topo in state.toponyms_with_candidates:
+                if topo.toponym_with_search_arguments.duplicate_of:
+                    for resolved_toponym in resolved_toponyms:
+                        if resolved_toponym.toponym.casefold() == topo.toponym_with_search_arguments.duplicate_of.casefold():
+                            adjusted_toponym = copy.copy(resolved_toponym)
+                            adjusted_toponym.toponym = topo.toponym_with_search_arguments.toponym
+                            state.geocoded_toponyms.append(adjusted_toponym)
+                            break
         return state
 
 
@@ -453,48 +467,76 @@ class ResolutionSyntaxValidator:
         :return: GeoCodingState - The graph state additionally containing the validated resolved toponyms
         """
         try:
-            temp_gt_toponyms = [toponym.toponym_with_search_arguments.toponym.casefold()
-                                for toponym in state.toponyms_with_candidates]
-            for resolved_toponym in state.geocoded_toponyms:
+            state.invalid_geocoded_toponyms = []
+
+            # Create a list of toponyms to resolve, excluding already resolved ones
+            temp_gt_toponyms = [
+                str(toponym.toponym_with_search_arguments.toponym)
+                for toponym in state.toponyms_with_candidates
+            ]
+            if state.valid_geocoded_toponyms:
+                for valid_toponym in state.valid_geocoded_toponyms:
+                    temp_gt_toponyms.remove(valid_toponym.toponym)
+
+            # Copy resolved toponyms
+            resolved_toponyms = state.geocoded_toponyms.copy()
+
+            def _validate_resolved_toponym(resolved_toponym):
+                """Validates the resolved toponym and returns errors if any."""
                 errors = []
                 if not isinstance(resolved_toponym.toponym, str):
                     errors.append("Toponym must be a string.")
                 if not isinstance(resolved_toponym.reasoning, str):
                     errors.append("Reasoning must be a string.")
-                if not _is_integer(resolved_toponym.selected_candidate_geonameId):
+                if resolved_toponym.selected_candidate_geonameId and not _is_integer(
+                        resolved_toponym.selected_candidate_geonameId):
                     errors.append("Selected candidate geonameId must be an integer.")
+                return errors
 
-                if not resolved_toponym.toponym.casefold() in temp_gt_toponyms:
-                    errors.append("Resolved toponym does not reference a toponym in the article.")
+            # Validate resolved toponyms
+            remaining_toponyms = temp_gt_toponyms[:]
+            for resolved_toponym in resolved_toponyms:
+                errors = _validate_resolved_toponym(resolved_toponym)
+
+                # Check if the resolved toponym is in the article
+                matched = next(
+                    (i for i, topo in enumerate(remaining_toponyms) if
+                     topo.casefold() == resolved_toponym.toponym.casefold()),
+                    None
+                )
+
+                if matched is not None:
+                    del remaining_toponyms[matched]  # Remove the matched toponym from the remaining list
                 else:
-                    temp_gt_toponyms.remove(resolved_toponym.toponym.casefold())
+                    errors.append("Resolved toponym does not reference a toponym in the article.")
 
                 if errors:
-                    resolved_toponym_with_errors = ResolvedToponymWithErrors(
+                    state.invalid_geocoded_toponyms.append(ResolvedToponymWithErrors(
                         **resolved_toponym.model_dump(),
                         errors=[Error(
                             execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
-                            error_message=str(errors))]
-                    )
-                    state.invalid_geocoded_toponyms.append(resolved_toponym_with_errors)
+                            error_message=", ".join(errors)
+                        )]
+                    ))
                 else:
                     state.valid_geocoded_toponyms.append(resolved_toponym)
 
-            if temp_gt_toponyms:
-                for toponym in temp_gt_toponyms:
-                    state.invalid_geocoded_toponyms.append(ResolvedToponymWithErrors(
-                        toponym=toponym,
-                        reasoning="",
-                        selected_candidate_geonameId=0,
-                        errors=[Error(
-                            execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
-                            error_message="LLM resolution step is missing a generation for this toponym.")]
-                    ))
+            # Add unresolved toponyms to invalid list
+            for toponym in remaining_toponyms:
+                state.invalid_geocoded_toponyms.append(ResolvedToponymWithErrors(
+                    toponym=toponym,
+                    reasoning="",
+                    selected_candidate_geonameId=0,
+                    errors=[Error(
+                        execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
+                        error_message="LLM resolution step is missing a generation for this toponym."
+                    )]
+                ))
 
             return state
         except Exception as e:
             state.resolution_fatal_errors.append(Error(execution_step=ExecutionStep.RESOLUTIONSYNTAXVALIDATOR,
-                                            error_message=str(e)))
+                                                       error_message=str(e)))
             return state
 
 

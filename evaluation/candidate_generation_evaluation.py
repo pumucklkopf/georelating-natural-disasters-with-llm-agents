@@ -262,6 +262,10 @@ class CandidateGenerationEvaluator:
         # Accuracy@k
         within_k = [d <= k for d in error_distances]
         accuracy_at_k = sum(within_k) / len(error_distances)
+        print(f"Accuracy@{k}: {accuracy_at_k}")
+
+        strict_accuracy_at_k = sum(within_k) / total_toponyms
+        print(f"Strict Accuracy@{k}: {strict_accuracy_at_k}")
 
         # AUC
         def calculate_auc(sorted_values):
@@ -301,7 +305,8 @@ if __name__ == "__main__":
     output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250120_seed_24_1000_articles"
     evaluator = CandidateGenerationEvaluator(data_dir, output_dir)
 
-    accuracy_at_161, auc = evaluator.calculate_candidate_resolution_metrics(directory=output_dir)
+    accuracy_at_161, auc = evaluator.calculate_candidate_resolution_metrics(directory=output_dir,
+                                                                            k=161)
     # metrics = evaluator.calculate_candidate_generation_metrics()
     #
     # print("--------\nCandidate generation metrics:")

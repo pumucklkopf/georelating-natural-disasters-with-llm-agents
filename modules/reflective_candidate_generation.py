@@ -1,3 +1,4 @@
+import json
 import pickle
 import os
 import time
@@ -27,7 +28,8 @@ class ReflectiveCandidateGenerator:
                  actor_model_name: str = "meta-llama-3.1-8b-instruct",
                  critic_model_name: str = "meta-llama-3.1-8b-instruct",
                  call_times: list = None,
-                 skip_few_shot_loader: bool = False):
+                 skip_few_shot_loader: bool = False,
+                 data_set: str = 'LGL'):
         load_dotenv()
         self.working_memory = WorkingMemory(skip_few_shot_loader=skip_few_shot_loader)
         self.data_handler = self.working_memory.few_shot_handler.data_handler
@@ -39,6 +41,7 @@ class ReflectiveCandidateGenerator:
         self.output_parser = OutputParser()
         self.resolution_validator = ResolutionSyntaxValidator()
         self.call_times = call_times if call_times else []
+        self.data_set = data_set
 
     """
     Node functions
@@ -49,7 +52,10 @@ class ReflectiveCandidateGenerator:
     ####################################################################################################################
 
     def create_prompt(self, input_state: CandidateGenerationState) -> CandidateGenerationState:
-        toponyms = self.data_handler.get_short_toponyms_for_article(input_state.article_id)
+        if self.data_set == "GeoCoDe":
+            toponyms = input_state.toponyms
+        else:
+            toponyms = self.data_handler.get_short_toponyms_for_article(input_state.article_id)
         prompt = self.working_memory.create_final_prompt()
         formatted_prompt = prompt.format(
             input__heading=input_state.article_title,
@@ -489,16 +495,25 @@ class ReflectiveCandidateGenerator:
     Compile and run the graph
     """
 
-    def run_generation_graph(self, article: pd.Series):
+    def run_generation_graph(self, article: pd.Series | dict):
         graph_builder = self.build_graph()
         agent_graph = graph_builder.compile()
 
-        # Run the graph
-        input_state = {
-            "article_id": article['docid'],
-            "article_title": article['title'],
-            "article_text": article['text']
-        }
+        if self.data_set == "GeoCoDe":
+            input_state = {
+                "article_id": article['article_id'],
+                "article_title": "Not provided",
+                "article_text": article['article_text'],
+                "toponyms": article['toponyms']
+            }
+        else:
+            input_state = {
+                "article_id": article['docid'],
+                "article_title": article['title'],
+                "article_text": article['text']
+            }
+
+        # Invoke the graph
         agent_graph_answer = agent_graph.invoke(input_state)
 
         return agent_graph_answer
@@ -507,18 +522,21 @@ class ReflectiveCandidateGenerator:
                                                         seed: int = 42,
                                                         nof_articles: int = 100,
                                                         output_dir: str = 'output/'):
-        os.makedirs(output_dir, exist_ok=True)
+        def _modify_geocode_article(article):
+            # Find the position of " is a " in the article_text
+            split_marker = " is a "
+            if split_marker in article["article_text"]:
+                split_index = article["article_text"].index(split_marker)
 
-        articles_df = self.data_handler.get_random_articles_for_evaluation(
-            seed=seed, n=nof_articles
-        )
-        for index, article in tqdm(articles_df.iterrows(), total=len(articles_df), desc="Processing articles"):
-            # First check if the article has already been processed
-            article_id = article['docid']
+                # Extract the article_about part
+                article["article_about"] = article["article_text"][:split_index]
 
-            if os.path.exists(os.path.join(output_dir, f'{article_id}.pkl')):
-                continue
+                # Remove the article_about part from article_text
+                article["article_text"] = article["article_text"][split_index + len(split_marker):]
 
+            return article
+
+        def _generate_and_save_candidates_for_article(article):
             agent_graph_answer = self.run_generation_graph(article)
 
             # Parse dictionary (default langgraph output) to CandidateGenerationState
@@ -527,6 +545,42 @@ class ReflectiveCandidateGenerator:
             with open(os.path.join(output_dir, f'{article_id}.pkl'), 'wb') as f:
                 # noinspection PyTypeChecker
                 pickle.dump(agent_graph_answer, f)
+
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        if self.data_set == "GeoCoDe":
+            with open("data/processed_GeoCoDe_test.json", "r", encoding="utf-8") as f:
+                articles = json.load(f)
+
+            # Modify the articles to exclude the explicit toponym the article is about from the text
+            articles = [_modify_geocode_article(article) for article in articles if " is a " in article["article_text"]]
+
+            # Limit the number of articles to process
+            articles = articles[:nof_articles]
+
+            for article in tqdm(articles, total=len(articles), desc="Processing articles"):
+                article_id = article['article_id']
+
+                # Skip processing if the article already exists
+                if os.path.exists(os.path.join(output_dir, f'{article_id}.pkl')):
+                    continue
+
+                _generate_and_save_candidates_for_article(article)
+
+        else:
+            articles_df = self.data_handler.get_random_articles_for_evaluation(
+                seed=seed, n=nof_articles
+            )
+            for index, article in tqdm(articles_df.iterrows(), total=len(articles_df), desc="Processing articles"):
+                # First check if the article has already been processed
+                article_id = article['docid']
+
+                if os.path.exists(os.path.join(output_dir, f'{article_id}.pkl')):
+                    continue
+
+                _generate_and_save_candidates_for_article(article)
+
 
     def generate_graph_image(self, output_file_path: str = "graph_layout_image.png", candidate_resolution: bool = False):
         if candidate_resolution:
@@ -551,6 +605,8 @@ class ReflectiveCandidateGenerator:
             if not candidate_file.endswith(".pkl"):
                 continue
             article_id = candidate_file.replace(".pkl", "")
+            if os.path.exists(os.path.join(output_dir, f'{article_id}.pkl')):
+                continue
             candidate_generation = evaluator.load_generation_for_article(article_id)
             candidate_generation_dict = preprocess_data(candidate_generation.model_dump(), GeoCodingState)
             graph_builder = self.build_resolution_graph()
@@ -568,30 +624,28 @@ if __name__ == "__main__":
     call_times = []
 
     seed = 24
-    nof_articles = 1000
+    nof_articles = 100
     actor = "llama-3.3-70b-instruct"  # ["meta-llama-3.1-8b-instruct", "llama-3.3-70b-instruct", "mistral-large-instruct"]
     critic = "mistral-large-instruct"
-    output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+    output_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/GeoCoDe/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
     # input dir for resolution graph
     input_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250115_seed_24_1000_articles'
 
     """
     Run reflective candidate resolution graph
     """
-    for actor, critic in [("llama-3.3-70b-instruct", "mistral-large-instruct"),
-                          ("meta-llama-3.1-8b-instruct", "meta-llama-3.1-8b-instruct"),
-                          ("meta-llama-3.1-8b-instruct", "mistral-large-instruct"),]:
-        output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
-        generator = ReflectiveCandidateGenerator(
-            actor_model_name=actor,
-            critic_model_name=critic,
-            call_times=call_times,
-            skip_few_shot_loader=True
-        )
-        start = time.time()
-        generator.run_resolution_graph(input_directory=input_dir, output_directory=output_dir)
-        with open(f"{output_dir}/stats.txt", "a") as f:
-            f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")
+    # for actor, critic in [("meta-llama-3.1-8b-instruct", "meta-llama-3.1-8b-instruct")]:
+    #     output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+    #     generator = ReflectiveCandidateGenerator(
+    #         actor_model_name=actor,
+    #         critic_model_name=critic,
+    #         call_times=call_times,
+    #         skip_few_shot_loader=True
+    #     )
+    #     start = time.time()
+    #     generator.run_resolution_graph(input_directory=input_dir, output_directory=output_dir)
+    #     with open(f"{output_dir}/stats.txt", "a") as f:
+    #         f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")
 
 
     """
@@ -603,15 +657,21 @@ if __name__ == "__main__":
     """
     Reflective Candidate Generation
     """
-    # start = time.time()
-    # generator.reflectively_generate_candidates_for_evaluation(
-    #     seed=seed,
-    #     nof_articles=nof_articles,
-    #     # output_dir="output/reflective_candidate_generation/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250114_seed_24_100_articles"
-    #     output_dir=output_dir
-    # )
-    # print(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.")
-    # # write time taken to txt file
-    # try:
-    #     with open(f"{output_dir}/stats.txt", "a") as f:
-    #         f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")
+    generator = ReflectiveCandidateGenerator(
+        actor_model_name=actor,
+        critic_model_name=critic,
+        call_times=call_times,
+        skip_few_shot_loader=False,
+        data_set="GeoCoDe"
+    )
+    start = time.time()
+    generator.reflectively_generate_candidates_for_evaluation(
+        seed=seed,
+        nof_articles=nof_articles,
+        # output_dir="output/reflective_candidate_generation/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250114_seed_24_100_articles"
+        output_dir=output_dir
+    )
+    print(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.")
+    # write time taken to txt file
+    with open(f"{output_dir}/stats.txt", "a") as f:
+        f.write(f"{actor}_with_{critic}_critic for {nof_articles} articles: time taken: {time.time() - start} seconds.\n")

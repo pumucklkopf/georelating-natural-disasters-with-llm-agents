@@ -1,4 +1,6 @@
 from typing import List, Dict
+import subprocess
+import os
 
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
@@ -10,7 +12,7 @@ from langchain_community.document_loaders import JSONLoader
 from data_handler.xml_parsing import XMLDataHandler
 
 class EpisodicMemory:
-    FEW_SHOT_EXAMPLE_PATH = 'data/few_shot_examples_generation.json'
+    FEW_SHOT_EXAMPLE_PATH = os.path.join(subprocess.check_output(['git', 'rev-parse', '--show-toplevel']).strip().decode(), 'data/few_shot_examples_generation.json')
 
     def __init__(self, data_directory: str, xml_file: str, skip_few_shot_loader: bool = False):
         self.data_handler = XMLDataHandler(data_directory)

@@ -21,6 +21,13 @@ class GeoNamesAPI:
         params.update({'username': os.getenv('GEONAMES_USERNAME')})
         url = self.base_url + urllib.parse.urlencode(params)
         response = requests.get(url)
+        if response.status_code != 200:
+            response = requests.get(url) #retry once
+            if response.status_code != 200:
+                raise Exception(f"Error in GeoNamesAPI.search: {response.text}")
+        json_response = response.json()
+        if 'geonames' not in json_response:
+            raise Exception(f"Error in GeoNamesAPI search: {json_response['status']['message']}")
         return response.json()
 
     def retrieve_candidates(self, validated_output: ValidatedOutput) -> CandidateGenerationOutput:

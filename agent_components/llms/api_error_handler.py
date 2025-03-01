@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import requests
 from openai import APITimeoutError, AuthenticationError, BadRequestError, ConflictError, \
     InternalServerError, NotFoundError, PermissionDeniedError, RateLimitError, UnprocessableEntityError
 import time
@@ -14,6 +15,7 @@ def handle_api_errors(call_times):
         def wrapper(*args, **kwargs):
             manual_retries = 0
             unexpected_rate_limit_retries = 0
+            connection_retries = 0
             while True:  # Loop indefinitely until the function succeeds
                 try:
                     now = time.time()
@@ -91,6 +93,14 @@ def handle_api_errors(call_times):
                         time.sleep(10)
                     else:
                         print(f"\nExceeded the maximum number of retries. Exiting. Error: {e}")
+                        return e
+                except requests.exceptions.ConnectionError as e:
+                    if connection_retries < 3:
+                        connection_retries += 1
+                        print(f"\nConnection error occurred. Retrying in 10 minutes... Attempt {connection_retries}/3. Error: {e}")
+                        time.sleep(600)
+                    else:
+                        print(f"\nExceeded the maximum number of retries for connection errors. Exiting. Error: {e}")
                         return e
                 except Exception as e:
                     print(f"\nAn unexpected error occurred. Error: {e}")

@@ -1,3 +1,6 @@
+import os
+import subprocess
+
 from langchain_core.prompts import PipelinePromptTemplate, PromptTemplate
 
 from agent_components.memory.episodic_memory import EpisodicMemory
@@ -7,10 +10,11 @@ from agent_components.llms.chatAI import ChatAIHandler
 
 class WorkingMemory:
     def __init__(self, skip_few_shot_loader: bool = False):
-        self.few_shot_handler = EpisodicMemory(data_directory='data/',
+        self.few_shot_handler = EpisodicMemory(data_directory=os.path.join(
+            subprocess.check_output(['git', 'rev-parse', '--show-toplevel']).strip().decode(), 'data/'),
                                                xml_file='LGL_test.xml',
                                                skip_few_shot_loader=skip_few_shot_loader)
-        self.long_term_memory = LongTermMemory(documentation_file="agent_components/memory/external_tool_documentation/geonames_websearch_documentation.md")
+        self.long_term_memory = LongTermMemory()#documentation_file="agent_components/memory/external_tool_documentation/geonames_websearch_documentation.md")
 
     def create_final_prompt(self) -> PipelinePromptTemplate:
         final_template = "{system_instructions}\n{task_instructions}\n{documentation}\n{few_shot_examples}"

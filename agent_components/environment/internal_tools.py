@@ -34,6 +34,16 @@ def _is_valid_countrycode(code):
     return pycountry.countries.get(alpha_2=code.upper()) is not None
 
 
+def _extract_thoughts(text):
+    # Regular expression to capture content inside <think>...</think>
+    pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
+    thoughts = pattern.findall(text)  # Extract thoughts
+    non_thoughts = pattern.sub("", text)  # Remove thoughts from text
+
+    return thoughts, non_thoughts.strip()
+
+
 class OutputParser:
     def __init__(self, article_id: str = "", toponym_list=None):
         if toponym_list is None:
@@ -56,6 +66,11 @@ class OutputParser:
         Raises:
             ValueError: If the content is not valid JSON.
         """
+        chain_of_thought, content = _extract_thoughts(content)
+        start = content.find("```json") + 7
+        end = content.find("```", start)  # Find the next occurrence after start
+        if end != -1:  # Ensure closing backticks exist
+            content = content[start:end]
         if content[0] != '[':
             content = content[content.find('['):]
         if content[-1] != ']':

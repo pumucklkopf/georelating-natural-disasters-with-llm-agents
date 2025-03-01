@@ -1,6 +1,8 @@
 import json
+import os
 import random
-from typing import Tuple, List
+import subprocess
+from typing import Tuple, List, Dict
 
 from langchain_community.document_loaders import TextLoader
 from langchain_core.prompts import PromptTemplate
@@ -13,9 +15,12 @@ from helpers.helpers import preprocess_data
 
 string_seperator = "\n\n----------------------------------------\n"
 
-
+file_path = os.path.dirname(os.path.abspath(__file__))
+root_path = subprocess.check_output(['git', 'rev-parse', '--show-toplevel']).strip().decode()
+GEONAMES_DOCUMENTATION = os.path.join(file_path, 'external_tool_documentation/geonames_websearch_documentation.md')
+FEWSHOT_RESOLUTION_EXAMPLES_PATH = os.path.join(root_path, "data/few_shot_examples_selection_short.json")
 class LongTermMemory:
-    def __init__(self, documentation_file='external_tool_documentation/geonames_websearch_documentation.md'):
+    def __init__(self, documentation_file=GEONAMES_DOCUMENTATION):
         self.documentation_file = documentation_file
         self.documentation = self._load_documentation()
         self.system_instructions_prompt = self._create_system_instructions()
@@ -52,9 +57,9 @@ class LongTermMemory:
         template = '''
             Human:
             Please create the search arguments for the GeoNames Websearch API based on the given news article.
-            
+
             Your Task:
-            
+
             1. Read the news article under the key 'News Article' to understand its content.
             2. Identify all the toponyms listed under the key 'Toponym List' within the article.
             3. For each toponym in the 'Toponym List,' generate the search arguments for the GeoNames Websearch API in JSON format.
@@ -150,7 +155,6 @@ class LongTermMemory:
         invalid_toponyms = [f"{topo.model_dump_json(indent=4)},\n" for topo in state.invalid_toponyms]
         invalid_toponyms = "".join(invalid_toponyms)
         invalid_toponyms_text = f"All incorrect toponyms with errors: \n [{invalid_toponyms}]"
-        # TODO: Check if new format of topos is better
         critic_instruction = "Your feedback:\n"
 
         critic_prompt_text = (critic_system_prompt + string_seperator +
@@ -214,7 +218,7 @@ class LongTermMemory:
                         "4. **Error Handling**:\n"
                         " - If the context is ambiguous or insufficient, state this explicitly in your reasoning.")
         # load example from json file
-        with open("data/few_shot_examples_selection_short.json", "r") as f:
+        with open(FEWSHOT_RESOLUTION_EXAMPLES_PATH, "r") as f:
             example = json.load(f)
         example_text = (f"Example: \n"
                         f"Title: {example['title']}\n"
@@ -376,15 +380,135 @@ class LongTermMemory:
         )
         return prompt.format()
 
+    ####################################################################################################################
+    # Reflective (Critic) GeoRelation
+    ####################################################################################################################
+
+    def _generate_georelation_system_prompt(self):
+        prompt = PromptTemplate.from_template(
+            "System:\n"
+            "You are a helpful assistant which is very confident about it's geographical knowledge. Thus, "
+            "you can provide the coordinates for the locations you are asked about. You provide them in decimal "
+            "degrees and respond strictly in JSON format!"
+        )
+        return prompt.format()
+
+    def _generate_georelation_task_instructions(self):
+        prompt = PromptTemplate.from_template(
+            "Human:\n"
+            "You are provided with an article focused on a specific geographical unit. This article references "
+            "several other geographical units (toponyms) for which you have been provided with coordinates. Your task "
+            "has two steps:\n"
+            "1. **Determine Coordinates**: Use your geographic understanding and the location description within the "
+            "article to identify and output the coordinates of the main geographical unit discussed in the article, "
+            "utilizing the coordinates of the referenced toponyms as a guide.\n"
+            "2. **Estimate Area**: Based on information from the article, identify the approximate area of this main "
+            "geographical unit in square kilometers (km^2).\n"
+            "Please follow these instructions carefully to complete the task accurately."
+        )
+        return prompt.format()
+
+    def _generate_georelation_example(self, example_path="data/few_shot_example_georelation.json"):
+        with open(example_path, "r") as f:
+            example = json.load(f)
+        template = (
+            f"Here is an example:\n{json.dumps(example, indent=4)}\n"
+            f"Now it's your turn. Determine the coordinates and estimate the area!"
+        )
+        prompt = PromptTemplate(
+            template=template,
+            template_format="mustache",
+            input_variables=[]
+        )
+        return prompt.format()
+
+    def _generate_input_georelation(self,
+                                    article_text: str,
+                                    mentioned_toponyms: List[Dict],
+                                    ) -> str:
+        toponyms_with_coordinates = [
+            {"toponym": topo["toponym"], "coordinates": topo["coordinates"]}
+            for topo in mentioned_toponyms
+        ]
+        input = {
+            "article_text": article_text,
+            "mentioned mentioned toponyms with coordinates": toponyms_with_coordinates
+        }
+        return f"{json.dumps(input, indent=4)}\nOutput in JSON: \n"
+
+    def generate_georelation_prompt(self,
+                                    article_text: str,
+                                    mentioned_toponyms: List[Dict],
+                                    example_path: str = "") -> str:
+        system_prompt = self._generate_georelation_system_prompt()
+        task_instructions = self._generate_georelation_task_instructions()
+        example = self._generate_georelation_example(example_path=example_path) if (
+            example_path) else self._generate_georelation_example()
+        input = self._generate_input_georelation(article_text=article_text,
+                                                 mentioned_toponyms=mentioned_toponyms)
+
+        prompt = (system_prompt + string_seperator +
+                  task_instructions + string_seperator +
+                  example + string_seperator +
+                  input)
+        return prompt
+
+
 
 # Example usage
 if __name__ == "__main__":
     handler = ChatAIHandler()
-    model = handler.get_model("codestral-22b")
-    long_term_memory = LongTermMemory()
-    chain = (long_term_memory.system_instructions_prompt |
-             long_term_memory.task_instructions_prompt |
-             long_term_memory.documentation_prompt |
-             model)
-    llm_answer = chain.invoke({"news_article": "The news article content", "toponym_list": ["toponym1", "toponym2"]})
+    model = handler.get_model("deepseek-r1-distill-llama-70b")
+    article_text = "Comune (municipality) in the Province of Bergamo in the Italian region of Lombardy, located about 80 kilometres (50mi) northeast of Milan and about 35 kilometres (22mi) northeast of Bergamo. As of 31 December 2004, it had a population of 1,246 and an area of 20.0 square kilometres (7.7sqmi).[3]"
+    mentioned_toponyms = [
+            {
+                "osm_id": "44996",
+                "coordinates": {
+                    "latitude": 45.7566816,
+                    "longitude": 9.8539018
+                },
+                "toponym": "Province of Bergamo"
+            },
+            {
+                "osm_id": "365331",
+                "coordinates": {
+                    "latitude": 41.1905551,
+                    "longitude": 12.7058702
+                },
+                "toponym": "Italian"
+            },
+            {
+                "osm_id": "44879",
+                "coordinates": {
+                    "latitude": 45.6576307,
+                    "longitude": 9.9627498
+                },
+                "toponym": "Lombardy"
+            },
+            {
+                "osm_id": "44915",
+                "coordinates": {
+                    "latitude": 45.4612932,
+                    "longitude": 9.1594985
+                },
+                "toponym": "Milan"
+            },
+            {
+                "osm_id": "45681",
+                "coordinates": {
+                    "latitude": 45.6934118,
+                    "longitude": 9.6665313
+                },
+                "toponym": "Bergamo"
+            }
+        ]
+    long_term_memory = LongTermMemory(documentation_file="agent_components/memory/external_tool_documentation/geonames_websearch_documentation.md")
+    prompt = long_term_memory.generate_georelation_prompt(article_text, mentioned_toponyms)
+    llm_answer = model.invoke(prompt)
     print(llm_answer.content)
+    # chain = (long_term_memory.system_instructions_prompt |
+    #          long_term_memory.task_instructions_prompt |
+    #          long_term_memory.documentation_prompt |
+    #          model)
+    # llm_answer = chain.invoke({"news_article": "The news article content", "toponym_list": ["toponym1", "toponym2"]})
+    # print(llm_answer.content)

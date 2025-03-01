@@ -1,4 +1,6 @@
+import json
 import os
+import traceback
 import pickle
 
 from pydantic import BaseModel, Field
@@ -6,7 +8,7 @@ from geopy.distance import geodesic
 import numpy as np
 
 from data_handler.xml_parsing import XMLDataHandler
-from models.candidates import CandidateGenerationOutput, CandidateGenerationState, GeoCodingState
+from models.candidates import CandidateGenerationOutput, CandidateGenerationState, GeoCodingState, GeoCodedArticle
 
 
 class CandidateGenerationMetrics(BaseModel):
@@ -31,25 +33,36 @@ class CandidateGenerationMetrics(BaseModel):
 
     avg_nof_candidates: float = Field(description="Average number of candidates per toponym if candidates were found",
                                       default=0)
-    nof_articles_with_fatal_errors: int = Field(description="Number of articles for which a fatal error occurred during the candidate generation",
-                                                default=0)
+    nof_articles_with_fatal_errors: int = Field(
+        description="Number of articles for which a fatal error occurred during the candidate generation",
+        default=0)
     nof_all_gt_toponyms: int = Field(description="Total number of ground truth toponyms",
                                      default=0)
     nof_all_generated_toponyms: int = Field(description="Total number of generated toponyms",
                                             default=0)
 
+
 class CandidateGenerationEvaluator:
     def __init__(self, data_directory: str, output_directory: str):
         self.data_directory = data_directory
         self.output_directory = output_directory
-        self.data_handler = XMLDataHandler(data_directory)
+        if "GeoCoDe" in output_directory:
+            self.data_handler = None
+        else:
+            self.data_handler = XMLDataHandler(data_directory)
 
-    def load_generation_for_article(self, docid: str) -> CandidateGenerationOutput | CandidateGenerationState | GeoCodingState | dict:
+    def load_generation_for_article(self,
+                                    docid: str) -> CandidateGenerationOutput | CandidateGenerationState | GeoCodingState | dict:
         file_path = os.path.join(self.output_directory, f"{docid}.pkl")
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Generated candidates for docid {docid} not found in {self.output_directory}.")
-        with open(file_path, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(file_path, "rb") as f:
+                document = pickle.load(f)
+                return document
+        except Exception as e:
+            print(f"Error loading generation for article {docid}: {e}")
+            traceback.print_exc()
 
     def calculate_candidate_generation_metrics(self) -> CandidateGenerationMetrics:
         total_toponyms = 0
@@ -108,7 +121,6 @@ class CandidateGenerationEvaluator:
 
                 nof_toponyms_without_valid_search_arguments += len(generation_for_article.invalid_toponyms)
 
-
                 # only for code error checking
                 nof_article_toponyms = len(article_toponyms)
                 if nof_article_generated_toponyms > nof_article_toponyms:
@@ -133,7 +145,8 @@ class CandidateGenerationEvaluator:
                         else:
                             nof_toponyms_with_candidates += 1
                             total_nof_candidates += toponym.total_results
-                            if any(str(candidate.get("geonameId")) == correct_geonameid for candidate in toponym.candidates[:10]):
+                            if any(str(candidate.get("geonameId")) == correct_geonameid for candidate in
+                                   toponym.candidates[:10]):
                                 matched_toponyms += 1
                                 if toponym.toponym_with_search_arguments.generated_by_retry:
                                     generated_by_retry += 1
@@ -144,7 +157,8 @@ class CandidateGenerationEvaluator:
 
             percentage_toponyms_without_valid_search_arguments = nof_toponyms_without_valid_search_arguments / total_toponyms
             percentage_toponyms_without_candidates = nof_toponyms_without_candidates / total_toponyms
-            percentage_toponyms_without_correct_candidates = (nof_toponyms_with_candidates - matched_toponyms) / total_toponyms
+            percentage_toponyms_without_correct_candidates = (
+                                                                         nof_toponyms_with_candidates - matched_toponyms) / total_toponyms
             percentage_toponyms_with_fatal_errors = toponyms_with_fatal_errors / total_toponyms
             percentage_too_many_generated_toponyms = too_many_generated_toponyms / total_toponyms
         else:
@@ -156,7 +170,6 @@ class CandidateGenerationEvaluator:
                 percentage_toponyms_with_fatal_errors = \
                 0
 
-
         # Calculate average number of candidates per toponym
         avg_nof_candidates = total_nof_candidates / nof_toponyms_with_candidates if nof_toponyms_with_candidates > 0 else 0
 
@@ -165,9 +178,9 @@ class CandidateGenerationEvaluator:
             print(f'FATAL: too few generated toponyms: {too_few_generated_toponyms}')
 
         print(f'Generated by retry: {generated_by_retry}, articles with critic: {article_with_critic}')
-        print(f'w/o_critic: {(matched_toponyms-generated_by_retry)/(total_toponyms)}\n'
-              f'w_critic: {matched_toponyms/(total_toponyms)}\n'
-              f'critic_percentage: {generated_by_retry/(total_toponyms)}')
+        print(f'w/o_critic: {(matched_toponyms - generated_by_retry) / (total_toponyms)}\n'
+              f'w_critic: {matched_toponyms / (total_toponyms)}\n'
+              f'critic_percentage: {generated_by_retry / (total_toponyms)}')
         return CandidateGenerationMetrics(
             recall_at_10=recall_at_10,
             percentage_toponyms_with_fatal_errors=percentage_toponyms_with_fatal_errors,
@@ -175,7 +188,7 @@ class CandidateGenerationEvaluator:
             percentage_toponyms_without_candidates=percentage_toponyms_without_candidates,
             percentage_toponyms_without_correct_candidates=percentage_toponyms_without_correct_candidates,
             percentage_too_many_generated_toponym_candidates=percentage_too_many_generated_toponyms,
-            avg_nof_candidates = avg_nof_candidates,
+            avg_nof_candidates=avg_nof_candidates,
             nof_articles_with_fatal_errors=articles_with_fatal_errors,
             nof_all_gt_toponyms=total_toponyms,
             nof_all_generated_toponyms=nof_all_generated_toponyms
@@ -193,18 +206,33 @@ class CandidateGenerationEvaluator:
         - k: Threshold distance in km for Accuracy@k (default 161 km).
 
         Returns:
-        - accuracy_at_k: Fraction of points within k km.
+        - accuracy_at_k: Fraction of geocoded points within k km.
+        - strict_accuracy_at_k: Fraction of all points within k km.
         - auc: Area under the curve value.
+        - mean_error_distance: Mean error distance in km.
+        - median_error_distance: Median error distance in km.
+        - correct_articles: List of GeoCodedArticle objects with all correct toponyms.
+        - nof_articles_with_fatal_errors: Number of articles with generation or resolution fatal errors.
         """
+
         articles_with_resolution_fatal_errors = 0
 
         total_toponyms = 0
         topos_with_incorrect_geonameid = 0
         topos_without_geonameid = 0
 
-        error_distances = []
+        correct_articles = []
+        articles_with_at_least_one_correct_toponym = []
+        nof_articles_with_fatal_errors = 0
 
-        self.data_handler.parse_xml("LGL_test.xml")
+        error_distances = []
+        error_distances_for_correct_articles = []
+
+        if "GeoCoDe" in directory:
+            with open("data/processed_GeoCoDe_test.json", "r", encoding="utf-8") as f:
+                geocode_articles = json.load(f)
+        else:
+            self.data_handler.parse_xml("LGL_test.xml")
 
         # Iterate through generated candidate files
         for candidate_file in os.listdir(directory):
@@ -215,29 +243,48 @@ class CandidateGenerationEvaluator:
 
             try:
                 generation_for_article = self.load_generation_for_article(docid)
-                if not isinstance(generation_for_article, GeoCodingState):
-                    generation_for_article = GeoCodingState(**generation_for_article)
             except FileNotFoundError:
                 continue
-            # Retrieve toponyms for the current article
-            article_toponyms = self.data_handler.get_toponyms_for_article(docid)
 
-            if generation_for_article.resolution_fatal_errors:
-                articles_with_resolution_fatal_errors += 1
+            # Retrieve toponyms for the current article
+            article_toponyms = []
+            if "GeoCoDe" in directory:
+                for model in geocode_articles:
+                    if model['article_id'].split()[0] == docid:
+                        article_toponyms = model["toponym_data"]
+                        break
+            else:
+                article_toponyms = self.data_handler.get_toponyms_for_article(docid)
+
+            if generation_for_article.fatal_errors:
+                nof_articles_with_fatal_errors += 1
+                print(f"Fatal error for article {docid}: {generation_for_article.fatal_errors}")
+            elif generation_for_article.resolution_fatal_errors:
+                nof_articles_with_fatal_errors += 1
                 print(f"Fatal error for article {docid}: {generation_for_article.resolution_fatal_errors}")
 
             selected_candidates = generation_for_article.valid_geocoded_toponyms.copy()
             toponyms_with_candidates = generation_for_article.toponyms_with_candidates.copy()
+
+            correct_toponyms_for_article = []
+            error_distances_for_article = []
+
             for gt_toponym in article_toponyms:
                 total_toponyms += 1
-                correct_geonameid = gt_toponym["geonameid"]
-                correct_latitude = gt_toponym["lat"]
-                correct_longitude = gt_toponym["lon"]
-                gt_coords = (correct_latitude, correct_longitude)
-                generated_coords = None
+                if "GeoCoDe" in directory:
+                    correct_latitude = gt_toponym["coordinates"]["latitude"]
+                    correct_longitude = gt_toponym["coordinates"]["longitude"]
+                    gt_coords = (correct_latitude, correct_longitude)
+                    gt_toponym_name = gt_toponym["toponym"]
+                else:
+                    correct_geonameid = gt_toponym["geonameid"]
+                    correct_latitude = gt_toponym["lat"]
+                    correct_longitude = gt_toponym["lon"]
+                    gt_coords = (correct_latitude, correct_longitude)
+                    gt_toponym_name = gt_toponym["phrase"]
 
                 for toponym in selected_candidates:
-                    if toponym.toponym.casefold() == gt_toponym["phrase"].casefold():
+                    if toponym.toponym.casefold() == gt_toponym_name.casefold():
                         if toponym.selected_candidate_geonameId in [None, 0]:
                             topos_without_geonameid += 1
                             selected_candidates.remove(toponym)
@@ -249,7 +296,13 @@ class CandidateGenerationEvaluator:
                                 for candidate in item.candidates:
                                     if toponym.selected_candidate_geonameId == candidate["geonameId"]:
                                         generated_coords = (candidate["lat"], candidate["lng"])
-                                        error_distances.append(geodesic(gt_coords, generated_coords).kilometers)
+                                        error_distance = geodesic(gt_coords, generated_coords).kilometers
+                                        error_distances.append(error_distance)
+                                        if error_distance <= k:
+                                            toponym.coordinates = {"latitude": candidate["lat"],
+                                                                   "longitude": candidate["lng"]}
+                                            correct_toponyms_for_article.append(toponym)
+                                            error_distances_for_article.append(error_distance)
                                         incorrect_geonameid = False
                                         break
                                 if incorrect_geonameid:
@@ -258,6 +311,17 @@ class CandidateGenerationEvaluator:
                                 break
                         selected_candidates.remove(toponym)
                         break
+            if len(correct_toponyms_for_article) == len(article_toponyms):
+                correct_articles.append(GeoCodedArticle(**generation_for_article.model_dump(),
+                                                        toponym_data=article_toponyms,
+                                                        correctly_geocoded_toponyms=correct_toponyms_for_article))
+                error_distances_for_correct_articles.extend(error_distances_for_article)
+            elif len(correct_toponyms_for_article) > 0:
+                articles_with_at_least_one_correct_toponym.append(GeoCodedArticle(
+                    **generation_for_article.model_dump(),
+                    correctly_geocoded_toponyms=correct_toponyms_for_article
+                ))
+        articles_with_at_least_one_correct_toponym.extend(correct_articles)
 
         # Accuracy@k
         within_k = [d <= k for d in error_distances]
@@ -284,7 +348,8 @@ class CandidateGenerationEvaluator:
             auc = sum * h / (size - 1)
             return auc
 
-        sorted_error_distances = sorted(error_distances)  # assuming error_distances is a dictionary with error error_distances
+        sorted_error_distances = sorted(
+            error_distances)  # assuming error_distances is a dictionary with error error_distances
         auc = calculate_auc(sorted_error_distances)
         print(f"AUC: {auc}")
 
@@ -296,17 +361,30 @@ class CandidateGenerationEvaluator:
         median_error_distance = np.median(error_distances)
         print(f"Median error distance: {median_error_distance}")
 
-        return accuracy_at_k, auc
+        print(f"Number of correctly geocoded articles: {len(correct_articles)}")
+        print(f"Number of articles with at least one correctly geocoded toponym: {len(articles_with_at_least_one_correct_toponym)}")
+        print(f"Median error distance for correctly geocoded articles: {np.median(error_distances_for_correct_articles)}")
+        print(f"Mean error distance for correctly geocoded articles: {np.mean(error_distances_for_correct_articles)}")
+        return (accuracy_at_k, strict_accuracy_at_k, auc, mean_error_distance, median_error_distance, correct_articles,
+                articles_with_at_least_one_correct_toponym, nof_articles_with_fatal_errors)
 
 
 # Example usage
 if __name__ == "__main__":
     data_dir = "data"
-    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250120_seed_24_1000_articles"
+    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/meta-llama-3.1-8b-instruct_with_meta-llama-3.1-8b-instruct_critic/20250122_seed_24_1000_articles"
     evaluator = CandidateGenerationEvaluator(data_dir, output_dir)
 
-    accuracy_at_161, auc = evaluator.calculate_candidate_resolution_metrics(directory=output_dir,
-                                                                            k=161)
+    k = 161
+
+    (accuracy_at_k, strict_accuracy_at_k, auc, mean_error_distance, median_error_distance, correct_articles,
+     articles_with_at_least_one_correct_toponym, articles_with_fatal_errors) = (
+        evaluator.calculate_candidate_resolution_metrics(directory=output_dir,k=k))
+    # save the correct articles to a json file
+    with open(f"{output_dir}/articles_with_at_least_one_correct_toponym_k_{k}.json", "w", encoding="utf-8") as f:
+        json.dump([article.model_dump() for article in articles_with_at_least_one_correct_toponym], f, ensure_ascii=False, indent=4)
+
+
     # metrics = evaluator.calculate_candidate_generation_metrics()
     #
     # print("--------\nCandidate generation metrics:")

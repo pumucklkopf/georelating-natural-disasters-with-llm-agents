@@ -158,6 +158,10 @@ class OutputParser:
                             adjusted_toponym.toponym = topo.toponym_with_search_arguments.toponym
                             state.geocoded_toponyms.append(adjusted_toponym)
                             break
+        else:
+            for retry_generated_resolution in state.geocoded_toponyms:
+                # set the generated_by_retry flag to True for the retry generated resolutions
+                retry_generated_resolution.generated_by_retry = True
         return state
 
 

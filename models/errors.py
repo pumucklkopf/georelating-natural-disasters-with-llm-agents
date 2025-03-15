@@ -15,5 +15,5 @@ class ExecutionStep(Enum):
     RESOLUTIONCRITIC = "resolution_critic"
 
 class Error(BaseModel):
-    execution_step: ExecutionStep = Field(description="The step in which the error occurred")
+    execution_step: ExecutionStep | str = Field(description="The step in which the error occurred")
     error_message: str = Field(description="The error message")

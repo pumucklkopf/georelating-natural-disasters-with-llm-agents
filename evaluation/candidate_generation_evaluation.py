@@ -9,6 +9,7 @@ import numpy as np
 
 from data_handler.xml_parsing import XMLDataHandler
 from models.candidates import CandidateGenerationOutput, CandidateGenerationState, GeoCodingState, GeoCodedArticle
+from models.errors import ExecutionStep
 
 
 class CandidateGenerationMetrics(BaseModel):
@@ -31,7 +32,7 @@ class CandidateGenerationMetrics(BaseModel):
         description="Number of toponyms for which too many toponym candidates were generated",
         default=0)
 
-    avg_nof_candidates: float = Field(description="Average number of candidates per toponym if candidates were found",
+    median_nof_candidates: float = Field(description="Median number of candidates per toponym if candidates were found",
                                       default=0)
     nof_articles_with_fatal_errors: int = Field(
         description="Number of articles for which a fatal error occurred during the candidate generation",
@@ -41,6 +42,12 @@ class CandidateGenerationMetrics(BaseModel):
     nof_all_generated_toponyms: int = Field(description="Total number of generated toponyms",
                                             default=0)
 
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, ExecutionStep):
+            return str(obj)  # or obj.to_dict(), or obj.__dict__
+        return super().default(obj)
 
 class CandidateGenerationEvaluator:
     def __init__(self, data_directory: str, output_directory: str):
@@ -69,7 +76,7 @@ class CandidateGenerationEvaluator:
         matched_toponyms = 0
 
         nof_toponyms_with_candidates = 0
-        total_nof_candidates = 0
+        total_nof_candidates = []
 
         nof_toponyms_without_valid_search_arguments = 0
         nof_toponyms_without_candidates = 0
@@ -84,6 +91,7 @@ class CandidateGenerationEvaluator:
 
         articles_with_fatal_errors = 0
         toponyms_with_fatal_errors = 0
+        articles_with_critc = []
 
         generated_by_retry = 0
         article_with_critic = 0
@@ -102,8 +110,15 @@ class CandidateGenerationEvaluator:
             except FileNotFoundError:
                 continue
 
-            if generation_for_article.reflected_prompt is not None:
+            if (hasattr(generation_for_article, "reflected_prompt") and
+                    generation_for_article.reflected_prompt is not None):
                 article_with_critic += 1
+                # if generation_for_article.reflection_phase == "actor_retry_after_fatal_error":
+                #     if np.random.rand() < 0.1:
+                #         if len(articles_with_critc) < 10:
+                #             articles_with_critc.append(generation_for_article)
+                #         else:
+                #             articles_with_critc[np.random.randint(0, 10)] = generation_for_article
 
             # Retrieve toponyms for the current article
             article_toponyms = self.data_handler.get_toponyms_for_article(docid)
@@ -111,6 +126,7 @@ class CandidateGenerationEvaluator:
             nof_article_generated_toponyms = len(
                 generation_for_article.toponyms_with_candidates + generation_for_article.invalid_toponyms)
             nof_all_generated_toponyms += nof_article_generated_toponyms
+
 
             if generation_for_article.fatal_errors:
                 articles_with_fatal_errors += 1
@@ -144,11 +160,12 @@ class CandidateGenerationEvaluator:
                             break
                         else:
                             nof_toponyms_with_candidates += 1
-                            total_nof_candidates += toponym.total_results
+                            total_nof_candidates.append(toponym.total_results)
                             if any(str(candidate.get("geonameId")) == correct_geonameid for candidate in
                                    toponym.candidates[:10]):
                                 matched_toponyms += 1
-                                if toponym.toponym_with_search_arguments.generated_by_retry:
+                                if (hasattr(toponym.toponym_with_search_arguments, "generated_by_retry") and
+                                        toponym.toponym_with_search_arguments.generated_by_retry):
                                     generated_by_retry += 1
                                 break
 
@@ -171,7 +188,7 @@ class CandidateGenerationEvaluator:
                 0
 
         # Calculate average number of candidates per toponym
-        avg_nof_candidates = total_nof_candidates / nof_toponyms_with_candidates if nof_toponyms_with_candidates > 0 else 0
+        median_nof_candidates = np.median(total_nof_candidates)
 
         if nof_articles_with_too_few_generated_toponyms > 0:
             print(f'FATAL: articles with too few generated toponyms: {nof_articles_with_too_few_generated_toponyms}')
@@ -181,6 +198,11 @@ class CandidateGenerationEvaluator:
         print(f'w/o_critic: {(matched_toponyms - generated_by_retry) / (total_toponyms)}\n'
               f'w_critic: {matched_toponyms / (total_toponyms)}\n'
               f'critic_percentage: {generated_by_retry / (total_toponyms)}')
+
+        # with open(f"{self.output_directory}/all_articles_with_critic_fatal.json", "w", encoding="utf-8") as f:
+        #     json.dump([article.model_dump() for article in articles_with_critc], f, ensure_ascii=False, indent=4,
+        #               cls=CustomJSONEncoder)
+
         return CandidateGenerationMetrics(
             recall_at_10=recall_at_10,
             percentage_toponyms_with_fatal_errors=percentage_toponyms_with_fatal_errors,
@@ -188,7 +210,7 @@ class CandidateGenerationEvaluator:
             percentage_toponyms_without_candidates=percentage_toponyms_without_candidates,
             percentage_toponyms_without_correct_candidates=percentage_toponyms_without_correct_candidates,
             percentage_too_many_generated_toponym_candidates=percentage_too_many_generated_toponyms,
-            avg_nof_candidates=avg_nof_candidates,
+            median_nof_candidates=median_nof_candidates,
             nof_articles_with_fatal_errors=articles_with_fatal_errors,
             nof_all_gt_toponyms=total_toponyms,
             nof_all_generated_toponyms=nof_all_generated_toponyms
@@ -228,6 +250,11 @@ class CandidateGenerationEvaluator:
         error_distances = []
         error_distances_for_correct_articles = []
 
+        generated_by_retry = 0
+        critic_intervention = 0
+        articles_with_critic = []
+        nof_articles = 0
+
         if "GeoCoDe" in directory:
             with open("data/processed_GeoCoDe_test.json", "r", encoding="utf-8") as f:
                 geocode_articles = json.load(f)
@@ -246,6 +273,8 @@ class CandidateGenerationEvaluator:
             except FileNotFoundError:
                 continue
 
+            nof_articles += 1
+
             # Retrieve toponyms for the current article
             article_toponyms = []
             if "GeoCoDe" in directory:
@@ -262,6 +291,11 @@ class CandidateGenerationEvaluator:
             elif generation_for_article.resolution_fatal_errors:
                 nof_articles_with_fatal_errors += 1
                 print(f"Fatal error for article {docid}: {generation_for_article.resolution_fatal_errors}")
+
+            if not generation_for_article.resolution_critic_prompt == '':
+                critic_intervention += 1
+                articles_with_critic.append(generation_for_article)
+
 
             selected_candidates = generation_for_article.valid_geocoded_toponyms.copy()
             toponyms_with_candidates = generation_for_article.toponyms_with_candidates.copy()
@@ -303,6 +337,8 @@ class CandidateGenerationEvaluator:
                                                                    "longitude": candidate["lng"]}
                                             correct_toponyms_for_article.append(toponym)
                                             error_distances_for_article.append(error_distance)
+                                        if hasattr(toponym, 'generated_by_retry') and toponym.generated_by_retry:
+                                            generated_by_retry += 1
                                         incorrect_geonameid = False
                                         break
                                 if incorrect_geonameid:
@@ -323,6 +359,9 @@ class CandidateGenerationEvaluator:
                 ))
         articles_with_at_least_one_correct_toponym.extend(correct_articles)
 
+        print(f'Generated by retry: {generated_by_retry}')
+        print(f'share of articles with critic intervention: {critic_intervention/nof_articles}')
+
         # Accuracy@k
         within_k = [d <= k for d in error_distances]
         accuracy_at_k = sum(within_k) / len(error_distances)
@@ -333,14 +372,14 @@ class CandidateGenerationEvaluator:
 
         # AUC
         def calculate_auc(sorted_values):
-            max_error = 20039  # Earth's circumference in km / 2 (maximum possible distance)
+            max_error = 20038  # Earth's circumference in km / 2 (maximum possible distance)
             size = len(sorted_values)
             if size <= 1:
                 return 0.0
 
             h = 1  # step size
             sum = 0.5 * (np.log(1 + sorted_values[0]) / np.log(max_error) + np.log(
-                1 + sorted_values[-1]) / np.log(max_error))  # initial area
+                1 + sorted_values[-1]) / np.log(max_error))  # initial area first and last terms weighted by 0.5
 
             for i in range(1, size - 1):
                 sum += np.log(1 + sorted_values[i]) / np.log(max_error)
@@ -365,6 +404,12 @@ class CandidateGenerationEvaluator:
         print(f"Number of articles with at least one correctly geocoded toponym: {len(articles_with_at_least_one_correct_toponym)}")
         print(f"Median error distance for correctly geocoded articles: {np.median(error_distances_for_correct_articles)}")
         print(f"Mean error distance for correctly geocoded articles: {np.mean(error_distances_for_correct_articles)}")
+
+        # with open(f"{self.output_directory}/all_articles_with_critic.json", "w", encoding="utf-8") as f:
+        #     json.dump([article.model_dump() for article in articles_with_critic], f, ensure_ascii=False, indent=4,
+        #               cls=CustomJSONEncoder)
+
+
         return (accuracy_at_k, strict_accuracy_at_k, auc, mean_error_distance, median_error_distance, correct_articles,
                 articles_with_at_least_one_correct_toponym, nof_articles_with_fatal_errors)
 
@@ -372,17 +417,17 @@ class CandidateGenerationEvaluator:
 # Example usage
 if __name__ == "__main__":
     data_dir = "data"
-    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/meta-llama-3.1-8b-instruct_with_meta-llama-3.1-8b-instruct_critic/20250122_seed_24_1000_articles"
+    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250305_seed_24_1000_articles"
     evaluator = CandidateGenerationEvaluator(data_dir, output_dir)
 
-    k = 161
+    k = 50
 
     (accuracy_at_k, strict_accuracy_at_k, auc, mean_error_distance, median_error_distance, correct_articles,
      articles_with_at_least_one_correct_toponym, articles_with_fatal_errors) = (
         evaluator.calculate_candidate_resolution_metrics(directory=output_dir,k=k))
     # save the correct articles to a json file
-    with open(f"{output_dir}/articles_with_at_least_one_correct_toponym_k_{k}.json", "w", encoding="utf-8") as f:
-        json.dump([article.model_dump() for article in articles_with_at_least_one_correct_toponym], f, ensure_ascii=False, indent=4)
+    # with open(f"{output_dir}/articles_with_at_least_one_correct_toponym_k_{k}.json", "w", encoding="utf-8") as f:
+    #     json.dump([article.model_dump() for article in articles_with_at_least_one_correct_toponym], f, ensure_ascii=False, indent=4)
 
 
     # metrics = evaluator.calculate_candidate_generation_metrics()
@@ -398,5 +443,5 @@ if __name__ == "__main__":
     # print(f"Number of all ground truth toponyms: {metrics.nof_all_gt_toponyms}")
     # print(f"Number of all generated toponyms: {metrics.nof_all_generated_toponyms}\n--------")
     #
-    # print(f"Average number of candidates per toponym if candidates were found: {metrics.avg_nof_candidates:.2f}")
+    # print(f"Median number of candidates per toponym if candidates were found: {metrics.median_nof_candidates:.2f}")
     # print(f"Number of articles with fatal errors: {metrics.nof_articles_with_fatal_errors}")

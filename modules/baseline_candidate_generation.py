@@ -39,7 +39,7 @@ class CandidateGenerator:
         # Build the processing chain
         chain = (
             self.llm
-            | parser.extract_output
+            | parser.extract_generation_output
             | self.validator.validate_toponyms_of_article
             | self.geonames.retrieve_candidates
         )
@@ -93,11 +93,11 @@ if __name__ == "__main__":
     seed = 24
     nof_articles = 100
     candidate_generator = CandidateGenerator(
-       #llm_model_name="meta-llama-3.1-8b-instruct"
+       llm_model_name="mistral-large-instruct"
     )
     start = time.time()
     candidate_generator.generate_candidates_for_evaluation(
         seed=seed,
         nof_articles=nof_articles,
-        output_dir=f'output/baseline_candidate_generation/llama_8b/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles_2')
+        output_dir=f'output/baseline_candidate_generation/mistral-large/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles')
     print(f"Processing {nof_articles} articles took {time.time() - start:.2f} seconds.")

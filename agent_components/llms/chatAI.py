@@ -94,6 +94,6 @@ class ChatAIHandler:
 # if main test call_llm
 if __name__ == "__main__":
     handler = ChatAIHandler()
-    model = handler.get_model("mistral-large-instruct")
+    model = handler.get_model("deepseek-r1-distill-llama-70b")
     prediction = handler.call_llm(model, "What are the coordinates of Lüneburg?")
     print(prediction)

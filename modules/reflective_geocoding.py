@@ -663,10 +663,10 @@ if __name__ == "__main__":
     """
     Run reflective candidate resolution graph
     """
-    for actor, critic in [("deepseek-r1-distill-llama-70b", "deepseek-r1-distill-llama-70b")]:
-        input_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/GeoCoDe/deepseek-r1-distill-llama-70b_with_deepseek-r1-distill-llama-70b_critic/20250201_seed_24_1000_articles'
-        #output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
-        output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/deepseek-r1-distill-llama-70b_with_deepseek-r1-distill-llama-70b_critic/20250201_seed_24_1000_articles"
+    for actor, critic in [("llama-3.3-70b-instruct", "mistral-large-instruct")]:
+        input_dir = f'output/reflective_candidate_generation/fatal_error_and_invalid_correction/GeoCoDe/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250122_seed_24_1000_articles'
+        output_dir = f'output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/{actor}_with_{critic}_critic/{pd.Timestamp.now().strftime("%Y%m%d")}_seed_{seed}_{nof_articles}_articles'
+        #output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/deepseek-r1-distill-llama-70b_with_deepseek-r1-distill-llama-70b_critic/20250201_seed_24_1000_articles"
         generator = ReflectiveGeoCoder(
             actor_model_name=actor,
             critic_model_name=critic,

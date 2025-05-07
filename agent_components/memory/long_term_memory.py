@@ -366,7 +366,7 @@ class LongTermMemory:
             invalid_prompt_part = (f"**Retry for article:** \n"
                                    f"{input_text + string_seperator}"
                                    f"Short List of all missing toponyms: [{invalids}]{string_seperator}"
-                                   "Now generate the search arguments ONLY for all missing toponyms, NOT for the "
+                                   "Now select the candidates ONLY for all missing toponyms, NOT for the "
                                    "valid ones. \n")
 
         reflected_prompt_text = (self.reflective_actor_system_prompt + string_seperator +
@@ -396,14 +396,14 @@ class LongTermMemory:
     def _generate_georelation_task_instructions(self):
         prompt = PromptTemplate.from_template(
             "Human:\n"
-            "You are provided with an article focused on a specific geographical unit. This article references "
+            "You are provided with an article focused on a natural disaster. This article references "
             "several other geographical units (toponyms) for which you have been provided with coordinates. Your task "
             "has two steps:\n"
             "1. **Determine Coordinates**: Use your geographic understanding and the location description within the "
-            "article to identify and output the coordinates of the main geographical unit discussed in the article, "
+            "article to identify and output the coordinates of the area affected by the natural disaster discussed in the article, "
             "utilizing the coordinates of the referenced toponyms as a guide.\n"
-            "2. **Estimate Area**: Based on information from the article, identify the approximate area of this main "
-            "geographical unit in square kilometers (km^2).\n"
+            "2. **Estimate Area**: Based on information from the article, identify the approximate area of this "
+            "area in square kilometers (km^2).\n"
             "Please follow these instructions carefully to complete the task accurately."
         )
         return prompt.format()

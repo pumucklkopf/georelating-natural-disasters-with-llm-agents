@@ -5,9 +5,9 @@ from openai import APITimeoutError, AuthenticationError, BadRequestError, Confli
     InternalServerError, NotFoundError, PermissionDeniedError, RateLimitError, UnprocessableEntityError
 import time
 
-DAILY_RATE_LIMIT = 3000
-HOURLY_RATE_LIMIT = 300
-MINUTE_RATE_LIMIT = 50
+DAILY_RATE_LIMIT = 75000
+HOURLY_RATE_LIMIT = 3000
+MINUTE_RATE_LIMIT = 60
 
 
 def handle_api_errors(call_times):

@@ -381,7 +381,7 @@ class LongTermMemory:
         return prompt.format()
 
     ####################################################################################################################
-    # Reflective (Critic) GeoRelation
+    # GeoRelation
     ####################################################################################################################
 
     def _generate_georelation_system_prompt(self):
@@ -432,7 +432,7 @@ class LongTermMemory:
         ]
         input = {
             "article_text": article_text,
-            "mentioned mentioned toponyms with coordinates": toponyms_with_coordinates
+            "mentioned toponyms with coordinates": toponyms_with_coordinates
         }
         return f"{json.dumps(input, indent=4)}\nOutput in JSON: \n"
 

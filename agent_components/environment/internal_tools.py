@@ -52,13 +52,15 @@ class OutputParser:
         self.toponym_list = toponym_list
 
     @staticmethod
-    def clean_and_parse_json_content(content: str):
+    def clean_and_parse_json_content(content: str, start_token: str = '[', end_token: str = ']') -> list:
         """
         Ensures the content is valid JSON by removing characters before the first '['
         and after the last ']'. Then parses the JSON content.
 
         Args:
             content (str): The raw content to be cleaned and parsed.
+            start_token (str): The starting token to find the beginning of the JSON content.
+            end_token (str): The ending token to find the end of the JSON content.
 
         Returns:
             list: The parsed JSON content as a Python object.
@@ -71,10 +73,10 @@ class OutputParser:
         end = content.find("```", start)  # Find the next occurrence after start
         if end != -1:  # Ensure closing backticks exist
             content = content[start:end]
-        if content[0] != '[':
-            content = content[content.find('['):]
-        if content[-1] != ']':
-            content = content[:content.rfind(']') + 1]
+        if content[0] != start_token:
+            content = content[content.find(start_token):]
+        if content[-1] != end_token:
+            content = content[:content.rfind(end_token) + 1]
         return json.loads(content)
 
     @staticmethod

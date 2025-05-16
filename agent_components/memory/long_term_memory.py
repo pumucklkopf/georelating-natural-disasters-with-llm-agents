@@ -400,9 +400,9 @@ class LongTermMemory:
             "several other geographical units (toponyms) for which you have been provided with coordinates. Your task "
             "has two steps:\n"
             "1. **Determine Coordinates**: Use your geographic understanding and the location description within the "
-            "article to identify and output the coordinates of the area affected by the natural disaster discussed in the article, "
-            "utilizing the coordinates of the referenced toponyms as a guide.\n"
-            "2. **Estimate Area**: Based on information from the article, identify the approximate area of this "
+            "article to identify and output the center coordinates of the area affected by the natural disaster "
+            "discussed in the article, utilizing the coordinates of the referenced toponyms as a guide.\n"
+            "2. **Estimate Area**: Based on information from the article, identify the approximate area of the affected "
             "area in square kilometers (km^2).\n"
             "Please follow these instructions carefully to complete the task accurately."
         )

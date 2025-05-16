@@ -8,6 +8,7 @@ import time
 DAILY_RATE_LIMIT = 75000
 HOURLY_RATE_LIMIT = 3000
 MINUTE_RATE_LIMIT = 60
+SECOND_RATE_LIMIT = 2
 
 
 def handle_api_errors(call_times):
@@ -68,16 +69,22 @@ def handle_api_errors(call_times):
                         print(
                             f"\nHourly rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)
-                    elif len(relevant_call_times) > DAILY_RATE_LIMIT and now - relevant_call_times[-MINUTE_RATE_LIMIT] < 60:
+                    elif len(relevant_call_times) > MINUTE_RATE_LIMIT and now - relevant_call_times[-MINUTE_RATE_LIMIT] < 60:
                         time_to_sleep = relevant_call_times[-MINUTE_RATE_LIMIT] + 60 - now
                         print(
                             f"\nMinute rate limit exceeded. Waiting for {time_to_sleep} seconds before retrying. Error: {e}")
                         time.sleep(time_to_sleep)
+                    elif len(relevant_call_times) > SECOND_RATE_LIMIT and now - relevant_call_times[-SECOND_RATE_LIMIT] < 1:
+                        time_to_sleep = 1
+                        print(
+                            f"\nSecond rate limit exceeded. Waiting for 1 second before retrying. Error: {e}")
+                        time.sleep(time_to_sleep)
                     else:
                         unexpected_rate_limit_retries += 1
                         if unexpected_rate_limit_retries < 10:
-                            print(f"\nUnexpected Rate Limit Error: {e}. Waiting for 10 minutes before retrying.")
-                            time.sleep(600)
+                            time_to_sleep = 2**unexpected_rate_limit_retries
+                            print(f"\nUnexpected Rate Limit Error: {e}. Waiting for {time_to_sleep} seconds before retrying.")
+                            time.sleep(time_to_sleep)
                         else:
                             print(f"\nExceeded the maximum number of retries for unexpected rate limit errors. Exiting. Error: {e}")
                             return e

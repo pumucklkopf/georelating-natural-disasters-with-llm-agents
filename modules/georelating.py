@@ -305,7 +305,9 @@ def load_already_processed_indices(output_path):
             try:
                 record = json.loads(line)
                 # Defensive: might be integer or string, normalize as pandas does
-                indices.add(record["index"])
+                # check if column "georelated" is not None
+                if record.get("georelated") is not None:
+                    indices.add(record["index"])
             except Exception:
                 continue
     return indices
@@ -362,7 +364,8 @@ def load_processed_jsonl(jsonl_path):
 
 if __name__ == "__main__":
     for data_file in ["cleaned_georelating_dataset_us.json", "cleaned_georelating_dataset_eu.json"]:
-        timestamp = pd.Timestamp.now().strftime("%Y%m%d")
+        #timestamp = pd.Timestamp.now().strftime("%Y%m%d")
+        timestamp = 20250517
 
         nlp = stanza.Pipeline(lang='en', processors='tokenize,ner')
 

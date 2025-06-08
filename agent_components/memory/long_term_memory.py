@@ -428,7 +428,7 @@ class LongTermMemory:
                                     ) -> str:
         toponyms_with_coordinates = [
             {"toponym": topo["toponym"], "coordinates": topo["coordinates"]}
-            for topo in mentioned_toponyms
+            for topo in mentioned_toponyms if topo["coordinates"] != {}
         ]
         input = {
             "article_text": article_text,

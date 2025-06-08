@@ -132,51 +132,9 @@ def extract_geocoded_toponyms(candidate_resolution: GeoCodingState):
     return geocoded_toponyms
 
 
-"""
-Toponym Recognition
-"""
-
-
-def recognize_toponyms(article_text):
-    doc = nlp(article_text)
-    entities = doc.entities
-    toponyms = []
-
-    i = 0
-    while i < len(entities):
-        current = entities[i]
-        current_text = current.text.strip()
-        current_end = current.end_char
-
-        # Check if the current entity is a valid toponym type
-        if current.type not in ["LOC", "GPE"]:
-            i += 1
-            continue
-
-        # Look ahead
-        if i + 1 < len(entities):
-            next_entity = entities[i + 1]
-            between_text = article_text[current_end:next_entity.start_char].strip()
-
-            # Case 1: Merge if comma-separated and no "and" (likely compound toponym)
-            if between_text == "," and next_entity.type in ["GPE"]:
-                merged_toponym = f"{current_text}, {next_entity.text.strip()}"
-                # Check if the merged toponym is already in the list
-                if merged_toponym not in toponyms:
-                    toponyms.append(merged_toponym)
-                i += 2
-                continue
-
-        if current_text not in toponyms:
-            toponyms.append(current_text)
-
-        i += 1
-
-    return toponyms
-
 
 """
-GeoRelating
+GeoRelation
 """
 
 
@@ -204,9 +162,9 @@ def georelate(model_name: str, long_term_memory, article_text: str, mentioned_to
 
 # Instantiate
 rate_limiter = MultiWindowRateLimiter([
-    (1, 1),        # 2 per second
-    (50, 60),      # 60 per minute
-    (2700, 3600),  # 3000 per hour
+    (2, 1),        # 2 per second
+    (59, 60),      # 60 per minute
+    (2999, 3600),  # 3000 per hour
 ])
 
 def safe_llm_call(fn, *args, **kwargs):
@@ -296,6 +254,63 @@ def process_row_save_as_jsonl(row, geocoder, generation_agent_graph, resolution_
 
     return result
 
+def process_row_georelate_only(row, geocoder, geocoded_toponyms_map, output_path, processed_indices_set, lock):
+    idx = row.name
+    # if idx in processed_indices_set:
+    #     logging.info(f"Article {idx} already processed, skipping.")
+    #     return None  # Already processed
+
+    try:
+        logging.info(f"Processing georelation for article {row['landmark_id']}")
+
+        # Load from previous run
+        geocoded_toponyms = geocoded_toponyms_map.get(row["landmark_id"])
+        if not geocoded_toponyms:
+            logging.warning(f"No geocoded_toponyms found for {row['landmark_id']}; skipping.")
+            return None
+
+        prompt = geocoder.working_memory.long_term_memory.generate_georelation_prompt(
+            article_text=row['disaster_news_article_text'],
+            mentioned_toponyms=geocoded_toponyms['geocoded_toponyms'],
+            example_path=r"data/few_shot_example_georelation.json"
+        )
+        prompt = prompt.encode('utf-8').decode('unicode_escape')
+        llm_answer = safe_llm_call(geocoder.llm.invoke, prompt)
+        cleaned_output, thoughts = OutputParser.clean_and_parse_json_content(llm_answer.content, '{', '}', return_thoughts=True)
+
+        # check if thoughts is a list and not empty
+        if isinstance(thoughts, list) and len(thoughts) > 0:
+            thoughts = thoughts[0]  # take the first thought
+        else:
+            thoughts = "No thoughts provided"
+        result = {
+            "index": idx,
+            "landmark_id": row['landmark_id'],
+            "georelated": cleaned_output,
+            "geocoded_toponyms": geocoded_toponyms,  # optionally keep for audit
+            "thoughts": thoughts
+        }
+
+        with lock:
+            with open(output_path, "a", encoding="utf-8") as fout:
+                fout.write(json.dumps(result) + "\n")
+
+        logging.info(f"Completed georelation and saved article {row['landmark_id']}")
+        return result
+
+    except Exception as e:
+        logging.error(f"Failed georelation for article {row['landmark_id']}: {str(e)}")
+        result = {
+            "index": idx,
+            "landmark_id": row['landmark_id'],
+            "georelated": None,
+            "error": str(e)
+        }
+        with lock:
+            with open(output_path, "a", encoding="utf-8") as fout:
+                fout.write(json.dumps(result) + "\n")
+        return result
+
 def load_already_processed_indices(output_path):
     if not os.path.exists(output_path):
         return set()
@@ -309,6 +324,43 @@ def load_already_processed_indices(output_path):
             except Exception:
                 continue
     return indices
+
+def load_geocoded_toponyms_from_jsonl(jsonl_path):
+    """
+    Loads geocoded toponyms for each landmark_id from a previous jsonl file.
+    Returns: dict mapping landmark_id to geocoded_toponyms.
+    """
+    mapping = {}
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                record = json.loads(line)
+                mapping[record["landmark_id"]] = record.get("geocoded_toponyms")
+            except Exception as e:
+                continue
+    return mapping
+
+def parallel_georelate_only(df, geocoder, geocoded_toponyms_map, output_path):
+    processed_indices = load_already_processed_indices(output_path)
+    logging.info(f"Already processed {len(processed_indices)} rows, will skip them.")
+
+    lock = Lock()
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = []
+        for idx, row in df.iterrows():
+            futures.append(
+                executor.submit(
+                    process_row_georelate_only,
+                    row, geocoder,
+                    geocoded_toponyms_map,
+                    output_path,
+                    processed_indices,
+                    lock
+                )
+            )
+        for future in as_completed(futures):
+            _ = future.result()
+    logging.info("Georelation-only processing finished.")
 
 def parallel_process_dataframe_jsonl(df, geocoder, output_path):
     """
@@ -325,7 +377,7 @@ def parallel_process_dataframe_jsonl(df, geocoder, output_path):
 
     lock = Lock()  # for file write safety
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         futures = []
         for idx, row in df.iterrows():
             # Each thread gets the lock, processed_indices (could be updated, but OK for append-only)
@@ -358,54 +410,76 @@ def load_processed_jsonl(jsonl_path):
     df_results = pd.DataFrame(results)
     return df_results
 
-
+# ---- Main entry point ----
 
 if __name__ == "__main__":
-    data_file = "gandr.json"
-    timestamp = pd.Timestamp.now().strftime("%Y%m%d")
+    i = 1
+    while i < 5:
+        i += 1
+        for data_file in ["cleaned_georelating_dataset_us.json", "cleaned_georelating_dataset_eu.json"]:
+            # if it's past 08:00:00, stop the loop
+            current_time = pd.Timestamp.now().strftime("%H:%M:%S")
+            if "08:00:00" < current_time < "19:00:00":
+                logging.info("Stopping the loop as it's past 08:00:00")
+                break
+            for actor in ["deepseek-r1-distill-llama-70b", "meta-llama-3.1-8b-instruct", "gemma-3-27b-it", "llama-3.3-70b-instruct"]:
+                timestamp = pd.Timestamp.now().strftime("%Y%m%d")
+                processed_timestamp = "processed_20250517_"
 
-    nlp = stanza.Pipeline(lang='en', processors='tokenize,ner')
+                #nlp = stanza.Pipeline(lang='en', processors='tokenize,ner')
 
-    actor = "llama-3.3-70b-instruct"
-    critic = "mistral-large-instruct"
-    dataset = "New"
-    data_dir = "data"
-    output_dir = "output/georelating"
-    output_file = f"processed_{timestamp}_{data_file}l"
+                critic = "mistral-large-instruct"
+                dataset = "New"
+                data_dir = "data"
+                output_dir = "output/georelating"
+                output_file = f"processed_{actor}_{i}_{timestamp}_{data_file}l"
 
-    data_path = os.path.join(data_dir, data_file)
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Data file {data_path} does not exist.")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, output_file)
-    configure_logging(output_path.replace('.jsonl', "_log.log"))
-    logging.info(f"Starting georelating for {data_file}")
+                data_path = os.path.join(data_dir, data_file)
+                if not os.path.exists(data_path):
+                    raise FileNotFoundError(f"Data file {data_path} does not exist.")
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, output_file)
+                configure_logging(output_path.replace('.jsonl', "_log.log"))
+                logging.info(f"Starting georelating for {data_file}")
 
-    geocoder = ReflectiveGeoCoder(
-        actor_model_name=actor,
-        critic_model_name=critic,
-        call_times=[],
-        skip_few_shot_loader=False,
-        data_set=dataset
-    )
+                geocoder = ReflectiveGeoCoder(
+                    actor_model_name=actor,
+                    critic_model_name=critic,
+                    call_times=[],
+                    skip_few_shot_loader=False,
+                    data_set=dataset
+                )
 
-    df = pd.read_json(data_path, orient='records')
+                df = pd.read_json(data_path, orient='records')
 
-    df[['disaster_news_article_title', 'disaster_news_article_text']] = df.apply(extract_title_text_from_row, axis=1)
-    df['toponyms'] = df['disaster_news_article_text'].apply(recognize_toponyms)
+                df[['disaster_news_article_title', 'disaster_news_article_text']] = df.apply(extract_title_text_from_row,
+                                                                                             axis=1)
 
-    parallel_process_dataframe_jsonl(df, geocoder, output_path)
+                # Load prior geocoded toponyms
+                previous_jsonl = f"output/georelating/{processed_timestamp + data_file}l"
+                geocoded_toponyms_map = load_geocoded_toponyms_from_jsonl(previous_jsonl)
 
-    processed_df = load_processed_jsonl(output_path)
+                parallel_georelate_only(df, geocoder, geocoded_toponyms_map, output_path)
 
-    merged_df = pd.merge(
-        df,
-        processed_df[['landmark_id', 'georelated']],
-        on='landmark_id',
-        how='left'
-    )
+                # 1. Load processed results
+                processed_df = load_processed_jsonl(output_path)
 
-    output_merged_path = output_path.replace('.jsonl', '_enriched_4.json')
-    merged_df.to_json(output_merged_path, orient="records", force_ascii=False, indent=4)
-    logging.info(f"Enriched output written to: {output_merged_path}")
+                # 2. Merge new columns into your original df
+                merged_df = pd.merge(
+                    df,
+                    processed_df[['landmark_id', 'georelated']],
+                    on='landmark_id',
+                    how='left'
+                )
+
+                # 3. Save as enriched JSON
+                output_merged_path = output_path.replace('.jsonl', '_enriched.json')
+                merged_df.to_json(output_merged_path, orient="records", force_ascii=False, indent=4)
+                logging.info(f"Enriched output written to: {output_merged_path}")
+
+                # if it's past 08:00:00, stop the loop
+                current_time = pd.Timestamp.now().strftime("%H:%M:%S")
+                if "08:00:00" < current_time < "19:00:00":
+                    logging.info("Stopping the loop as it's past 08:00:00")
+                    break

@@ -6,6 +6,7 @@ import geopy.point
 from openai import OpenAI
 import io
 import base64
+import git
 import math
 import matplotlib.pyplot as plt
 import contextily as cx
@@ -24,13 +25,20 @@ from shapely.geometry import Point
 # --- CONFIGURATION CONSTANTS ---
 SEED = 42
 SAMPLE_SIZE = 1100
-GEOSPATIAL_PREP_WITH_BEARING = {
+SPATIAL_RELATION_WITH_AZIMUTH = {
     'north': 0, 'northeast': 45, 'east': 90, 'southeast': 135,
     'south': 180, 'southwest': 225, 'west': 270, 'northwest': 315,
     'between': None, 'near': None
 }
 H3_RESOLUTIONS = [5, 6, 7]
 NATURAL_DISASTERS = ['storm', 'flood', 'landslide', 'wild fire']
+COLUMNS = [
+    'landmark_id', 'landmark_name', 'asciiname', 'alternatenames',
+    'landmark_latitude', 'landmark_longitude', 'feature_class',
+    'landmark_feature_code', 'landmark_country_code', 'cc2', 'admin1_code',
+    'admin2_code', 'admin3_code', 'admin4_code', 'landmark_population',
+    'elevation', 'dem', 'timezone', 'modification_date'
+]
 
 load_dotenv()
 API_KEY = os.getenv("CHATAI_API_KEY")
@@ -39,13 +47,7 @@ MODEL = "gemma-3-27b-it"
 GEONAMES_USERNAME = os.getenv("GEONAMES_USERNAME")
 TILE_PROVIDER = cx.providers.OpenStreetMap.Mapnik
 
-COLUMNS = [
-    'landmark_id', 'landmark_name', 'asciiname', 'alternatenames',
-    'landmark_latitude', 'landmark_longitude', 'feature_class',
-    'landmark_feature_code', 'landmark_country_code', 'cc2', 'admin1_code',
-    'admin2_code', 'admin3_code', 'admin4_code', 'landmark_population',
-    'elevation', 'dem', 'timezone', 'modification_date'
-]
+repo_root = git.Repo('.', search_parent_directories=True).working_tree_dir
 
 def configure_logging(logfilename):
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -62,7 +64,7 @@ def configure_logging(logfilename):
     logger.addHandler(file_handler)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def load_data(include_us=True, include_eu=False, file_path='/Users/kaimoltzen/Downloads/cities5000.txt'):
+def load_data(include_us=True, include_eu=False, file_path=f'{repo_root}/data/gandr_prelims/cities5000.txt'):
     logging.info("Loading data from file...")
     df = pd.read_csv(
         file_path,
@@ -111,70 +113,69 @@ def get_nearby_city(landmark_id, latitude, longitude, population):
 
 def prepare_geospatial_data(sample, rng):
     logging.info("Preparing geospatial data...")
-    preps = list(GEOSPATIAL_PREP_WITH_BEARING.keys())
-    sample["geospatial_prep"] = rng.choice(preps, size=len(sample))
-    sample["bearing"] = sample["geospatial_prep"].map(GEOSPATIAL_PREP_WITH_BEARING)
-    sample["bearing"] = sample.apply(
-        lambda x: rng.integers(0, 361) if x["geospatial_prep"] == "near" else x["bearing"],
+    preps = list(SPATIAL_RELATION_WITH_AZIMUTH.keys())
+    sample["spatial_relation"] = rng.choice(preps, size=len(sample))
+    sample["azimuth"] = sample["spatial_relation"].map(SPATIAL_RELATION_WITH_AZIMUTH)
+    sample["azimuth"] = sample.apply(
+        lambda x: rng.integers(0, 361) if x["spatial_relation"] == "near" else x["azimuth"],
         axis=1
     )
-    sample["between_object"] = sample.apply(
+    sample["between_landmark_2"] = sample.apply(
         lambda x: get_nearby_city(x["landmark_id"], x["landmark_latitude"], x["landmark_longitude"], x["landmark_population"])
-        if x["geospatial_prep"] == "between" else None,
+        if x["spatial_relation"] == "between" else None,
         axis=1
     )
     sample["distance_to_landmark"] = sample.apply(
         lambda x: min(200_000, rng.lognormal(mean=np.log(x["landmark_population"] / 3), sigma=1))
-        if x["geospatial_prep"] != "between" else None,
+        if x["spatial_relation"] != "between" else None,
         axis=1
     )
-    # Robust: Filter rows with missing between_object
     before = len(sample)
-    sample = sample[~((sample["geospatial_prep"] == "between") & (sample["between_object"].isnull()))].copy()
+    sample = sample[~((sample["spatial_relation"] == "between") & (sample["between_landmark_2"].isnull()))].copy()
     after = len(sample)
     if after < before:
         logging.info(f"Removed {before - after} rows with no nearby city for 'between'")
     logging.info("Geospatial data preparation completed.")
     return sample
 
-def generate_target_location_description(row):
-    geospatial_prep = row['geospatial_prep']
+def generate_locative_expression(row):
+    spatial_relation = row['spatial_relation']
     name = row['landmark_name']
-    if geospatial_prep == "between":
-        if row['between_object'] is None:
+    if spatial_relation == "between":
+        if row['between_landmark_2'] is None:
             return None
         else:
-            return f"{geospatial_prep} {name} and {row['between_object']['name']}"
-    elif geospatial_prep == "near":
-        return f"{geospatial_prep} {name}"
+            return f"{spatial_relation} {name} and {row['between_landmark_2']['name']}"
+    elif spatial_relation == "near":
+        return f"{spatial_relation} {name}"
     else:
-        return f"{round(row['distance_to_landmark'] / 1000, 1)} km {geospatial_prep} of {name}"
+        return f"{round(row['distance_to_landmark'] / 1000, 1)} km {spatial_relation} of {name}"
 
 def prepare_target_location_info(sample, rng):
     logging.info("Preparing target location information...")
-    sample['target_location_description'] = sample.apply(generate_target_location_description, axis=1)
-    def _get_between_target_center(row):
-        if row['between_object'] is not None:
+    sample['locative_expression'] = sample.apply(generate_locative_expression, axis=1)
+    def _get_between_trajector_center(row):
+        if row['between_landmark_2'] is not None:
             return geopy.point.Point(
-                latitude=(float(row['between_object']['lat']) + float(row['landmark_latitude'])) / 2,
-                longitude=(float(row['between_object']['lng']) + float(row['landmark_longitude'])) / 2
+                latitude=(float(row['between_landmark_2']['lat']) + float(row['landmark_latitude'])) / 2,
+                longitude=(float(row['between_landmark_2']['lng']) + float(row['landmark_longitude'])) / 2
             )
         return None
-    sample["target_center"] = sample.apply(
+    sample["trajector_center"] = sample.apply(
         lambda x: geopy.distance.distance(kilometers=x["distance_to_landmark"]/1000).destination(
             (x["landmark_latitude"], x["landmark_longitude"]),
-            x["bearing"]
-        ) if x["geospatial_prep"] != "between" else _get_between_target_center(x),
+            x["azimuth"]
+        ) if x["spatial_relation"] != "between" else _get_between_trajector_center(x),
         axis=1
     )
 
-    land_poly = gpd.read_file("/Users/kaimoltzen/Downloads/ne_10m_land") # Change for your path
+    land_poly = gpd.read_file(f"{repo_root}/data/gandr_prelims/ne_10m_land") # Change for your path
     def _is_on_land(longitude, latitude, land_poly):
         location_point = gpd.GeoSeries([Point(longitude, latitude)], crs="EPSG:4326")
         joined = gpd.sjoin(location_point.to_frame("geometry"), land_poly, predicate="within")
         return not joined.empty
     sample["on_water"] = sample.apply(
-        lambda x: not _is_on_land(x["target_center"].longitude, x["target_center"].latitude, land_poly),
+        lambda x: not _is_on_land(x["trajector_center"].longitude, x["trajector_center"].latitude, land_poly),
         axis=1
     )
 
@@ -191,20 +192,20 @@ def prepare_target_location_info(sample, rng):
         else:
             probs = [p5 / total, p6 / total, p7 / total]
         return np.random.choice(H3_RESOLUTIONS, p=probs)
-    sample["target_h3_resolution"] = sample.apply(
+    sample["trajector_h3_level"] = sample.apply(
         lambda x: _sample_based_on_population(x["landmark_population"]),
         axis=1
     )
-    sample["target_cell"] = sample.apply(
+    sample["trajector_cell_index"] = sample.apply(
         lambda x: h3.latlng_to_cell(
-            lat=x["target_center"].latitude,
-            lng=x["target_center"].longitude,
-            res=x["target_h3_resolution"]
+            lat=x["trajector_center"].latitude,
+            lng=x["trajector_center"].longitude,
+            res=x["trajector_h3_level"]
         ),
         axis=1
     )
-    sample["target_area"] = sample.apply(
-        lambda x: h3.cell_area(x["target_cell"], unit="m^2"),
+    sample["trajector_area"] = sample.apply(
+        lambda x: h3.cell_area(x["trajector_cell_index"], unit="m^2"),
         axis=1
     )
     logging.info("Target location information preparation completed.")
@@ -296,7 +297,7 @@ def generate_area_description_from_mapimage(idx, landmark_id, image_base64, natu
     return idx, response.choices[0].message.content
 
 @rate_limited_call
-def generate_disaster_news_article(idx, landmark_id, description, disaster, target_location_description):
+def generate_disaster_news_article(idx, landmark_id, description, disaster, locative_expression):
     if not description:
         logging.warning(f"Empty description for landmark ID {landmark_id}")
         return idx, None
@@ -310,8 +311,8 @@ def generate_disaster_news_article(idx, landmark_id, description, disaster, targ
                     {
                         "type": "text",
                         "text": f"Please provide an AP-style news article about a {disaster} which happened "
-                                f"{target_location_description}. The article should be about 300 words long and "
-                                f"explicitly include the location description '{target_location_description}'. "
+                                f"{locative_expression}. The article should be about 300 words long and "
+                                f"explicitly include the location description '{locative_expression}'. "
                                 f"The area where the {disaster} occurred is described as: {description}",
                     }
                 ]
@@ -340,16 +341,16 @@ def main(include_us=True, include_eu=False):
     rng = np.random.default_rng(SEED)
     sample = prepare_geospatial_data(sample, rng)
     sample = prepare_target_location_info(sample, rng)
-    sample = sample[sample['target_center'].notnull()].copy()
+    sample = sample[sample['trajector_center'].notnull()].copy()
     sample["natural_disaster"] = rng.choice(NATURAL_DISASTERS, size=len(sample))
 
     # --- First: make all maps in parallel with ProcessPoolExecutor ---
     logging.info("Generating map images in parallel...")
     maps_args = []
     for idx, row in sample.iterrows():
-        lat = row["target_center"].latitude
-        lon = row["target_center"].longitude
-        map_size_meters = 2 * np.sqrt(row["target_area"])
+        lat = row["trajector_center"].latitude
+        lon = row["trajector_center"].longitude
+        map_size_meters = 2 * np.sqrt(row["trajector_area"])
         maps_args.append((idx, lat, lon, map_size_meters))
     map_results = {}
     with ProcessPoolExecutor(max_workers=1) as pexec:
@@ -370,7 +371,7 @@ def main(include_us=True, include_eu=False):
             idx, desc = fut.result()
             area_desc_results[idx] = desc
             save_sample_to_json(sample, "sample_after_map_generation.json")
-    sample["target_area_description"] = sample.index.map(area_desc_results.get)
+    sample["trajector_area_description"] = sample.index.map(area_desc_results.get)
     logging.info("Completed generating target area descriptions.")
 
     # --- Now, for each description, generate the news article (rate-limited, thread-pool-ed) ---
@@ -381,7 +382,7 @@ def main(include_us=True, include_eu=False):
         for idx, row in sample.iterrows():
             futures[executor.submit(
                 generate_disaster_news_article, idx, row["landmark_id"],
-                row["target_area_description"], row["natural_disaster"], row["target_location_description"]
+                row["trajector_area_description"], row["natural_disaster"], row["locative_expression"]
             )] = idx
         for fut in tqdm(as_completed(futures), desc="News Articles", total=len(futures)):
             idx, val = fut.result()
@@ -391,8 +392,8 @@ def main(include_us=True, include_eu=False):
     logging.info("Completed generating disaster news articles.")
 
     logging.info("Final clean-ups...")
-    sample["target_center"] = sample.apply(
-        lambda x: x["target_center"].format_decimal(altitude=False) if x["target_center"] is not None else None,
+    sample["trajector_center"] = sample.apply(
+        lambda x: x["trajector_center"].format_decimal(altitude=False) if x["trajector_center"] is not None else None,
         axis=1
     )
     logging.info(f"Saving dataset to {final_dataset_name}.json...")
@@ -402,6 +403,4 @@ def main(include_us=True, include_eu=False):
 
 tqdm.pandas()
 if __name__ == "__main__":
-    main(include_us=True, include_eu=False)
-    time.sleep(3600)
     main(include_us=False, include_eu=True)

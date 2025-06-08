@@ -417,10 +417,10 @@ class CandidateGenerationEvaluator:
 # Example usage
 if __name__ == "__main__":
     data_dir = "data"
-    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/LGL/meta-llama-3.1-8b-instruct_with_mistral-large-instruct_critic/20250121_seed_24_1000_articles"
+    output_dir = "output/reflective_candidate_resolution/fatal_error_and_invalid_correction/GeoCoDe/llama-3.3-70b-instruct_with_mistral-large-instruct_critic/20250305_seed_24_1000_articles"
     evaluator = CandidateGenerationEvaluator(data_dir, output_dir)
 
-    k = 161
+    k = 50
 
     (accuracy_at_k, strict_accuracy_at_k, auc, mean_error_distance, median_error_distance, correct_articles,
      articles_with_at_least_one_correct_toponym, articles_with_fatal_errors) = (

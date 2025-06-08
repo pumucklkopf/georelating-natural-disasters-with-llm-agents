@@ -63,10 +63,10 @@ class ChatAIHandler:
             return ChatOpenAI(api_key=self.api_key,
                               base_url=self.base_url,
                               max_retries=1,
-                              timeout=httpx.Timeout(300.0),
+                              timeout=httpx.Timeout(500.0),
                               model_name=model_name,
-                              temperature=temperature,
-                              top_p=top_p)
+                              temperature=0)
+                              #top_p=top_p)
 
     def get_embedding_model(self, model_name="e5-mistral-7b-instruct") -> OpenAIEmbeddings:
         """
@@ -94,6 +94,6 @@ class ChatAIHandler:
 # if main test call_llm
 if __name__ == "__main__":
     handler = ChatAIHandler()
-    model = handler.get_model("deepseek-r1-distill-llama-70b")
+    model = handler.get_model("mistral-large-instruct")
     prediction = handler.call_llm(model, "What are the coordinates of Lüneburg?")
     print(prediction)

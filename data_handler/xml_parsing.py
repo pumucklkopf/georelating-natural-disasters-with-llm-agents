@@ -149,24 +149,11 @@ if __name__ == "__main__":
     data_handler = XMLDataHandler('data/')
     data_handler.parse_xml('LGL_test.xml')
 
-    topos_with_gaztag = data_handler.get_all_toponyms_with_gaztag()
-    topos_without_gaztag = data_handler.get_all_toponyms_without_gaztag()
-
-    # count how many unique toponyms are in the dataset and how many of these have gaztag
-    print("Number of unique toponyms:", len(topos_with_gaztag['phrase'].unique())+len(topos_without_gaztag['phrase'].unique()))
-    print("Number of unique toponyms with gaztag:", len(topos_with_gaztag['phrase'].unique()))
-
-    # count how many toponyms without gaztag remain if we exclude all for which the phrase contains one of the following words: st., street, streets, avenue, ave, boulevard, blvd, road, rd, highway, hwy, route, rte, interstate
-    topos_without_gaztag_filtered = topos_without_gaztag[~topos_without_gaztag['phrase'].str.contains(r'\b(?:St.|street|streets|avenue|ave|boulevard|blvd|road|rd|highway|hwy|route|rte|interstate|drive)\b', case=False)]
-    print("Number of unique toponyms without gaztag after filtering:", len(topos_without_gaztag_filtered['phrase'].unique()))
-
-
-
-    # for example_article in data_handler.get_all_articles_for_prompting().head(10).iterrows():
-    #     toponym_list = data_handler.get_toponyms_for_article(example_article[1]['docid']).values.tolist()
-    #     with open('output.txt', 'a') as f:
-    #         f.write(f"Article: {example_article[1]['docid']};{example_article[1]['title']};{example_article[1]['text']}"
-    #                 f"\nToponyms: {toponym_list}\n\n")
+    for example_article in data_handler.get_all_articles_for_prompting().head(10).iterrows():
+        toponym_list = data_handler.get_toponyms_for_article(example_article[1]['docid']).values.tolist()
+        with open('output.txt', 'a') as f:
+            f.write(f"Article: {example_article[1]['docid']};{example_article[1]['title']};{example_article[1]['text']}"
+                    f"\nToponyms: {toponym_list}\n\n")
 
     # article_docid = '39423136'
     # toponyms_for_article = data_handler.get_toponyms_for_article(article_docid)
@@ -174,8 +161,4 @@ if __name__ == "__main__":
     # print("Number of words in the text of all articles:", data_handler.articles_df['text'].apply(lambda x: len(x.split())).sum())
     # # count how many toponyms are duplicate in an article for all articles
     # print("Number of duplicate toponyms:", data_handler.count_duplicate_toponyms())
-
-    # specific_article = data_handler.get_article("40450848")
-    # topos = data_handler.get_toponyms_for_article("40450848")
-    # print(specific_article)
 

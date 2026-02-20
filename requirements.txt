@@ -17,7 +17,7 @@ pycountry==24.6.1
 pydantic==2.9.2
 pyproj==3.7.1
 python-dotenv==1.0.1
-Requests==2.32.3
+Requests==2.32.4
 Shapely==2.0.7
 stanza==1.10.1
 tqdm==4.66.6
